@@ -40,6 +40,69 @@ class RelationEncoder(nn.Module):
         self.tail_extractor = nn.Linear(2 * self.hidden_size, self.embed_size)
         self.bilinear = nn.Linear(self.embed_size * self.block_size, self.out_embed_size)
 
+    def hrt_pool(self,
+                 seq_lhs,
+                 ent_lhs,
+                 ent_to_seq_attn,
+                 ent_to_ent_attn,
+                 entity_id_labels,
+                 entity_pos,
+                 hts):
+        batch_size, num_attn_heads, _, seq_len = ent_to_seq_attn.size()
+        hss, tss, rel_seq_embeds = [], [], []
+
+        for doc_i in range(batch_size): # For every document in batch
+            cur_entity_id_labels = torch.tensor(entity_id_labels[doc_i]) # Get the tensor slices for the document, removing padding
+            cur_ent_lhs = ent_lhs[doc_i][:len(cur_entity_id_labels)] # Only need lhs from entity mentions not padding (cur_entity_id_labels is not padded so it gives us the amount of entity mentions)
+            cur_ent_to_seq_attn = ent_to_seq_attn[doc_i][:, len(cur_entity_id_labels), :] # [heads, n_ment, seq_len]
+            # cur_ent_to_ent_attn = ent_to_ent_attn[doc_i][:, :len(cur_entity_id_labels), :len(cur_entity_id_labels)] # [heads, n_ment, n_ment]
+
+            ent_embeds, ent_seq_attn = [], []
+            for ent_i in range(len(entity_pos[doc_i])): # For every entity in the document NOTE: (entity NOT mention). entity_pos is a list of lists of mentions for each entity [[mention1, mention2], [mention1], ...]
+                e_mask_i = cur_entity_id_labels == ent_i # Apply entity mask to get embeddings for entity e_i's mentions
+                e_emb = cur_ent_lhs[e_mask_i]
+                e_ent_seq_attn = cur_ent_to_seq_attn[:, e_mask_i, :]
+
+                if len(e_emb) > 1:
+                    e_emb = torch.logsumexp(e_emb, dim=0) # Logsumexp pool mention representations: [n_ment, hidden_size] -> [hidden_size]
+                    e_ent_seq_attn = e_ent_seq_attn.mean(1) # Average base sequence attentions across e_i's mentions: [heads, n_ment, seq_len] -> [heads, seq_len]
+                elif len(e_emb) == 1: # No need to pool if only one mention
+                    e_emb = e_emb[0]
+                    e_ent_seq_attn = e_ent_seq_attn[:, 0, :]
+                else: # If no mentions for entity ent_i, zero out
+                    e_emb = torch.zeros(self.hidden_size).to(ent_lhs)
+                    e_ent_seq_attn = torch.zeros(num_attn_heads, seq_len).to(ent_to_seq_attn)
+
+                ent_embeds.appent(e_emb)
+                ent_seq_attn.append(e_ent_seq_attn)
+            
+            ent_embeds = torch.stack(ent_embeds, dim=0) # [n_ent, hidden_size]
+            ent_seq_attn = torch.stack(ent_seq_attn, dim=0) # [n_ent, heads, seq_len]
+
+            # Head-Tail Pairs
+            ht_i = torch.LongTensor(hts[doc_i]).to(seq_lhs.device)
+
+            # Get HT Entity Embeddings
+            hs = torch.index_select(ent_embeds, 0, ht_i[:, 0])
+            ts = torch.index_select(ent_embeds, 0, ht_i[:, 1])
+
+            # Base Sequence Attention Embedding Calculation
+            h_attn_seq = torch.index_select(ent_seq_attn, 0, ht_i[:, 0])
+            t_attn_seq = torch.index_select(ent_seq_attn, 0, ht_i[:, 1])
+            ht_attn_seq = (h_attn_seq * t_attn_seq).mean(1) # Multiply the head and tail attentions and take the mean
+            ht_attn_seq = ht_attn_seq / (ht_attn_seq.sum(1, keepdim=True) + 1e-5)
+            rel_seq_emb = contract("ld,rl->rd", seq_lhs[doc_i], ht_attn_seq) # NOTE: explain what contract does
+
+            hss.append(hs)
+            tss.append(ts)
+            rel_seq_embeds.append(rel_seq_emb)
+
+        hss = torch.cat(hss, dim=0)
+        tss = torch.cat(tss, dim=0)
+        rel_seq_embeds = torch.cat(rel_seq_embeds, dim=0) # Representation of relationship between h,t based on base sequence
+
+        return hss, tss, rel_seq_embeds
+        
     
     def forward(self, batch):
         seq_lhs, ent_lhs, ent_to_seq_attn, ent_to_ent_attn, entity_id_labels = encode(model=self.luke_model,
@@ -49,3 +112,24 @@ class RelationEncoder(nn.Module):
         # NOTE: Keep in mind that each "entity" at this point (after collate_fn) is simply a single mention of an entity.
         #       A single mention of an entity does not necessarily represent the entire entity (there can be multiple mentions).
         #       Therefore, we pool entity mentions in the hrt_pool function to operate with single entity representations.
+        hs, ts, rel_seq_embeds = self.hrt_pool(seq_lhs=seq_lhs,
+                                               ent_lhs=ent_lhs,
+                                               ent_to_seq_attn=ent_to_seq_attn,
+                                               ent_to_ent_attn=ent_to_ent_attn,
+                                               entity_id_labels=entity_id_labels,
+                                               entity_pos=batch['entity_pos'],
+                                               hts=batch['hts'])
+
+        hs = torch.cat([hs, rel_seq_embeds], dim=1)
+        ts = torch.cat([ts, rel_seq_embeds], dim=1)
+
+        hs = torch.tanh(self.head_extractor(hs))
+        ts = torch.tanh(self.tail_extractor(ts))
+
+        b1 = hs.view(-1, self.embed_size // self.block_size, self.block_size)
+        b2 = ts.view(-1, self.embed_size // self.block_size, self.block_size)
+        bl = (b1.unsqueeze(3) * b2.unsqueeze(2)).view(-1, self.embed_size * self.block_size)
+
+        embeds = self.bilinear(bl)
+
+        return embeds

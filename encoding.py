@@ -59,39 +59,39 @@ def long_encode(model,
     doc_lens = batch['attention_mask'].sum(1).cpu().numpy().astype(np.int32).tolist() # Length of each document in the batch without padding
     doc_segments = [] # How many chunks for each document
 
-    for doc_idx, doc_len in enumerate(doc_lens): # Go through every document in the batch, checking if it needs to be chunked
+    for doc_i, doc_len in enumerate(doc_lens): # Go through every document in the batch, checking if it needs to be chunked
         if doc_len <= const.MAX_ENCODER_LENGTH: # No need to chunk
-            new_input_ids.append(batch['input_ids'][doc_idx])
-            new_attention_mask.append(batch['attention_mask'][doc_idx])
-            new_entity_ids.append(batch['entity_ids'][doc_idx])
-            new_entity_attention_mask.append(batch['entity_attention_mask'][doc_idx])
-            new_entity_position_ids.append(batch['entity_position_ids'][doc_idx])
-            new_entity_id_labels.append(batch['entity_id_labels'][doc_idx])
+            new_input_ids.append(batch['input_ids'][doc_i])
+            new_attention_mask.append(batch['attention_mask'][doc_i])
+            new_entity_ids.append(batch['entity_ids'][doc_i])
+            new_entity_attention_mask.append(batch['entity_attention_mask'][doc_i])
+            new_entity_position_ids.append(batch['entity_position_ids'][doc_i])
+            new_entity_id_labels.append(batch['entity_id_labels'][doc_i])
 
             doc_segments.append(1)
         else: # Must chunk into two segments
-            input_ids1 = torch.cat([batch['input_ids'][doc_idx, :const.MAX_ENCODER_LENGTH - end_tok_ids.size(0)], end_tok_ids], dim=-1) # First half token sequence, from start to max encoder length
-            attention_mask1 = batch['attention_mask'][doc_idx, :const.MAX_ENCODER_LENGTH]
+            input_ids1 = torch.cat([batch['input_ids'][doc_i, :const.MAX_ENCODER_LENGTH - end_tok_ids.size(0)], end_tok_ids], dim=-1) # First half token sequence, from start to max encoder length
+            attention_mask1 = batch['attention_mask'][doc_i, :const.MAX_ENCODER_LENGTH]
 
-            input_ids2 = torch.cat([start_tok_ids, batch['input_ids'][doc_idx, (doc_len - const.MAX_ENCODER_LENGTH + start_tok_ids.size(0)) : doc_len]], dim=-1) # Second half token sequence, from end to max encoder length
-            attention_mask2 =  batch['attention_mask'][doc_idx, (doc_len - const.MAX_ENCODER_LENGTH) : doc_len]
+            input_ids2 = torch.cat([start_tok_ids, batch['input_ids'][doc_i, (doc_len - const.MAX_ENCODER_LENGTH + start_tok_ids.size(0)) : doc_len]], dim=-1) # Second half token sequence, from end to max encoder length
+            attention_mask2 =  batch['attention_mask'][doc_i, (doc_len - const.MAX_ENCODER_LENGTH) : doc_len]
 
             entity_ids1, entity_attention_mask1, entity_position_ids1, entity_id_labels1 = [], [], [], [] # First segment
             entity_ids2, entity_attention_mask2, entity_position_ids2, entity_id_labels2 = [], [], [], [] # Second segment
-            for ment_idx, entity_id in enumerate(batch['entity_id_labels'][doc_idx]):
-                ment_tok_start = batch['entity_position_ids'][doc_idx][ment_idx][0] # Start position of entity mention in the document
+            for ment_i, entity_id in enumerate(batch['entity_id_labels'][doc_i]):
+                ment_tok_start = batch['entity_position_ids'][doc_i][ment_i][0] # Start position of entity mention in the document
 
                 if ment_tok_start < (const.MAX_ENCODER_LENGTH - end_tok_ids.size(0)): # Entity in the first segment
-                    entity_ids1.append(batch['entity_ids'][doc_idx][ment_idx])
-                    entity_attention_mask1.append(batch['entity_attention_mask'][doc_idx][ment_idx])
-                    entity_position_ids1.append(batch['entity_position_ids'][doc_idx][ment_idx])
+                    entity_ids1.append(batch['entity_ids'][doc_i][ment_i])
+                    entity_attention_mask1.append(batch['entity_attention_mask'][doc_i][ment_i])
+                    entity_position_ids1.append(batch['entity_position_ids'][doc_i][ment_i])
                     entity_position_ids1[-1][entity_position_ids1[-1] >= (const.MAX_ENCODER_LENGTH - end_tok_ids.size(0))] = const.PAD_IDS['entity_position_ids'] # Set out of bounds positions to -1
                     entity_id_labels1.append(entity_id)
 
                 if ment_tok_start > (doc_len - const.MAX_ENCODER_LENGTH) and ment_tok_start < (const.MAX_DOC_LENGTH - end_tok_ids.size(0)): # Entity in the second segment
-                    entity_ids2.append(batch['entity_ids'][doc_idx][ment_idx])
-                    entity_attention_mask2.append(batch['entity_attention_mask'][doc_idx][ment_idx])
-                    entity_position_ids2.append(batch['entity_position_ids'][doc_idx][ment_idx])
+                    entity_ids2.append(batch['entity_ids'][doc_i][ment_i])
+                    entity_attention_mask2.append(batch['entity_attention_mask'][doc_i][ment_i])
+                    entity_position_ids2.append(batch['entity_position_ids'][doc_i][ment_i])
                     entity_position_ids2[-1] -= (doc_len - const.MAX_ENCODER_LENGTH) # Reorienting position indexes with second segment start indexes. This will set -1s to below -1, adjusting for this in the subsequent line
                     entity_position_ids2[-1][torch.logical_or(entity_position_ids2[-1] >= (const.MAX_DOC_LENGTH - end_tok_ids.size(0)), entity_position_ids2[-1] < 0)] = const.PAD_IDS['entity_position_ids'] # set out of bounds positions to -1
                     entity_id_labels2.append(entity_id)

@@ -9,7 +9,7 @@ from losses import ATLoss
 from encoding import encode
 
 
-class RelationEncoder(nn.Module):
+class DocRedModel(nn.Module):
     def __init__(self,
                  model_name,
                  tokenizer,
@@ -17,8 +17,8 @@ class RelationEncoder(nn.Module):
                  embed_size=768, # Intermediary embedding for head and tail entities
                  out_embed_size=768, # Final embedding for the relationship
                  max_labels=4, # Max number of classes to predict for one entity pair
-                 block_size=64,):
-        super(RelationEncoder, self).__init__()
+                 block_size=64):
+        super(DocRedModel, self).__init__()
 
         if model_name not in [const.LUKE_BASE, const.LUKE_LARGE, const.LUKE_LARGE_TACRED]:
             raise ValueError(f'Invalid encoder name: {model_name}')
@@ -32,13 +32,16 @@ class RelationEncoder(nn.Module):
         self.hidden_size = 768 if self.model_name == const.LUKE_BASE else 1024
         self.out_embed_size = out_embed_size
 
-        self.loss_fn = ATLoss()
+        self.atloss_fn = ATLoss()
+        self.max_labels = max_labels
         self.num_class = num_class
 
         self.luke_model = AutoModel.from_pretrained(self.model_name) # Base model
         self.head_extractor = nn.Linear(2 * self.hidden_size, self.embed_size)
         self.tail_extractor = nn.Linear(2 * self.hidden_size, self.embed_size)
         self.bilinear = nn.Linear(self.embed_size * self.block_size, self.out_embed_size)
+
+        self.classifier_head = nn.Linear(self.out_embed_size, self.num_class)
 
     def hrt_pool(self,
                  seq_lhs,
@@ -54,7 +57,7 @@ class RelationEncoder(nn.Module):
         for doc_i in range(batch_size): # For every document in batch
             cur_entity_id_labels = torch.tensor(entity_id_labels[doc_i]) # Get the tensor slices for the document, removing padding
             cur_ent_lhs = ent_lhs[doc_i][:len(cur_entity_id_labels)] # Only need lhs from entity mentions not padding (cur_entity_id_labels is not padded so it gives us the amount of entity mentions)
-            cur_ent_to_seq_attn = ent_to_seq_attn[doc_i][:, len(cur_entity_id_labels), :] # [heads, n_ment, seq_len]
+            cur_ent_to_seq_attn = ent_to_seq_attn[doc_i][:, :len(cur_entity_id_labels), :] # [heads, n_ment, seq_len]
             # cur_ent_to_ent_attn = ent_to_ent_attn[doc_i][:, :len(cur_entity_id_labels), :len(cur_entity_id_labels)] # [heads, n_ment, n_ment]
 
             ent_embeds, ent_seq_attn = [], []
@@ -73,7 +76,7 @@ class RelationEncoder(nn.Module):
                     e_emb = torch.zeros(self.hidden_size).to(ent_lhs)
                     e_ent_seq_attn = torch.zeros(num_attn_heads, seq_len).to(ent_to_seq_attn)
 
-                ent_embeds.appent(e_emb)
+                ent_embeds.append(e_emb)
                 ent_seq_attn.append(e_ent_seq_attn)
             
             ent_embeds = torch.stack(ent_embeds, dim=0) # [n_ent, hidden_size]
@@ -87,11 +90,11 @@ class RelationEncoder(nn.Module):
             ts = torch.index_select(ent_embeds, 0, ht_i[:, 1])
 
             # Base Sequence Attention Embedding Calculation
-            h_attn_seq = torch.index_select(ent_seq_attn, 0, ht_i[:, 0])
-            t_attn_seq = torch.index_select(ent_seq_attn, 0, ht_i[:, 1])
-            ht_attn_seq = (h_attn_seq * t_attn_seq).mean(1) # Multiply the head and tail attentions and take the mean
-            ht_attn_seq = ht_attn_seq / (ht_attn_seq.sum(1, keepdim=True) + 1e-5)
-            rel_seq_emb = contract("ld,rl->rd", seq_lhs[doc_i], ht_attn_seq) # NOTE: explain what contract does
+            h_seq_attn = torch.index_select(ent_seq_attn, 0, ht_i[:, 0])
+            t_seq_attn = torch.index_select(ent_seq_attn, 0, ht_i[:, 1])
+            ht_seq_attn = (h_seq_attn * t_seq_attn).mean(1) # Multiply the head and tail attentions and take the mean
+            ht_seq_attn = ht_seq_attn / (ht_seq_attn.sum(1, keepdim=True) + 1e-5)
+            rel_seq_emb = contract("ld,rl->rd", seq_lhs[doc_i], ht_seq_attn) # NOTE: explain what contract does
 
             hss.append(hs)
             tss.append(ts)
@@ -103,8 +106,7 @@ class RelationEncoder(nn.Module):
 
         return hss, tss, rel_seq_embeds
         
-    
-    def forward(self, batch):
+    def embed(self, batch):
         seq_lhs, ent_lhs, ent_to_seq_attn, ent_to_ent_attn, entity_id_labels = encode(model=self.luke_model,
                                                                                       batch=batch,
                                                                                       start_tok_ids=self.start_tok_ids,
@@ -133,3 +135,17 @@ class RelationEncoder(nn.Module):
         embeds = self.bilinear(bl)
 
         return embeds
+    
+    def forward(self, batch):
+        embeds = self.embed(batch)
+        logits = self.classifier_head(embeds)
+
+        preds = self.atloss_fn.get_label(logits.float(), num_labels=self.max_labels)
+
+        loss = None
+        if batch['labels'] is not None:
+            labels = [torch.tensor(l) for l in batch['labels']]
+            labels = torch.cat(labels, dim=0).float().to(logits)
+            loss = self.atloss_fn(logits.float(), labels.float())
+
+        return embeds, preds, loss

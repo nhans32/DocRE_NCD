@@ -110,7 +110,7 @@ def read_docred(fp, tokenizer, rel2id, max_seq_length=const.MAX_DOC_LENGTH):
         samp = {
             'input_ids': input_ids, # [CLS] + document tokens + [SEP]
             'entity_pos': entity_pos, # List of entities, each entity is a list of mention positions for the entity in the form of (start, end)
-            'labels': labels, # List of labels for each entity pair, in the form of a vector 
+            'labels': labels if len(labels) > 0 else None, # List of labels for each entity pair, in the form of a vector 
             'hts': hts, # List of all entity pairs
             'title': doc['title'], # Title of document (for evaluation script)
         }

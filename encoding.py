@@ -1,5 +1,4 @@
 # ADAPTED FROM: https://github.com/wzhouad/ATLOP/blob/main/long_seq.py
-
 import torch
 import numpy as np
 import torch.nn.functional as F
@@ -61,8 +60,8 @@ def long_encode(model,
 
     for doc_i, doc_len in enumerate(doc_lens): # Go through every document in the batch, checking if it needs to be chunked
         if doc_len <= const.MAX_ENCODER_LENGTH: # No need to chunk
-            new_input_ids.append(batch['input_ids'][doc_i])
-            new_attention_mask.append(batch['attention_mask'][doc_i])
+            new_input_ids.append(batch['input_ids'][doc_i, :const.MAX_ENCODER_LENGTH])
+            new_attention_mask.append(batch['attention_mask'][doc_i, :const.MAX_ENCODER_LENGTH])
             new_entity_ids.append(batch['entity_ids'][doc_i])
             new_entity_attention_mask.append(batch['entity_attention_mask'][doc_i])
             new_entity_position_ids.append(batch['entity_position_ids'][doc_i])
@@ -101,11 +100,11 @@ def long_encode(model,
 
             entity_ids1 = torch.tensor(entity_ids1).to(batch['entity_ids'])
             entity_attention_mask1 = torch.tensor(entity_attention_mask1).to(batch['entity_attention_mask'])
-            entity_position_ids1 = torch.tensor(entity_position_ids1).to(batch['entity_position_ids'])
+            entity_position_ids1 = torch.stack(entity_position_ids1).to(batch['entity_position_ids'])
 
             entity_ids2 = torch.tensor(entity_ids2).to(batch['entity_ids'])
             entity_attention_mask2 = torch.tensor(entity_attention_mask2).to(batch['entity_attention_mask'])
-            entity_position_ids2 = torch.tensor(entity_position_ids2).to(batch['entity_position_ids'])
+            entity_position_ids2 = torch.stack(entity_position_ids2).to(batch['entity_position_ids'])
 
             entity_ids1 = F.pad(entity_ids1, (0, batch_entity_len - len(entity_ids1)), 'constant', const.PAD_IDS['entity_ids'])
             entity_attention_mask1 = F.pad(entity_attention_mask1, (0, batch_entity_len - len(entity_attention_mask1)), 'constant', const.PAD_IDS['entity_attention_mask'])
@@ -213,7 +212,7 @@ def recombine_chunks(doc_lens,
             ent_hs = F.pad(ent_hs, (0, 0, 0, new_entity_len - len(entity_id_labels_combined))) # Pad to maximum entity length compared to original entity length
 
             # -- ENTITY TO BASE SEQUENCE ATTENTION COMBINATION --
-            ent_seq_attn1 = ent_to_seq_attn[i][:, :len(entity_id_labels[i]), :const.MAX_ENCODER_LEN - end_tok_ids.size(0)]
+            ent_seq_attn1 = ent_to_seq_attn[i][:, :len(entity_id_labels[i]), :const.MAX_ENCODER_LENGTH - end_tok_ids.size(0)]
             ent_seq_attn1 = F.pad(ent_seq_attn1, (0, batch_seq_len - const.MAX_ENCODER_LENGTH + end_tok_ids.size(0), 0, new_entity_len - len(entity_id_labels[i])))
 
             ent_seq_attn2 = ent_to_seq_attn[i + 1][:, :len(entity_id_labels[i + 1]), start_tok_ids.size(0):] # pad entity attentions before combining, pad zeros before for attn 1 and after for attn 2

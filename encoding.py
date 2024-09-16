@@ -212,7 +212,7 @@ def recombine_chunks(doc_lens,
             ent_hs = F.pad(ent_hs, (0, 0, 0, new_entity_len - len(entity_id_labels_combined))) # Pad to maximum entity length compared to original entity length
 
             # -- ENTITY TO BASE SEQUENCE ATTENTION COMBINATION --
-            ent_seq_attn1 = ent_to_seq_attn[i][:, :len(entity_id_labels[i]), :const.MAX_ENCODER_LENGTH - end_tok_ids.size(0)]
+            ent_seq_attn1 = ent_to_seq_attn[i][:, :len(entity_id_labels[i]), :const.MAX_ENCODER_LENGTH - end_tok_ids.size(0)] 
             ent_seq_attn1 = F.pad(ent_seq_attn1, (0, batch_seq_len - const.MAX_ENCODER_LENGTH + end_tok_ids.size(0), 0, new_entity_len - len(entity_id_labels[i])))
 
             ent_seq_attn2 = ent_to_seq_attn[i + 1][:, :len(entity_id_labels[i + 1]), start_tok_ids.size(0):] # pad entity attentions before combining, pad zeros before for attn 1 and after for attn 2

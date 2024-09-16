@@ -58,7 +58,6 @@ class DocRedModel(nn.Module):
             cur_entity_id_labels = torch.tensor(entity_id_labels[doc_i]) # Get the tensor slices for the document, removing padding
             cur_ent_lhs = ent_lhs[doc_i][:len(cur_entity_id_labels)] # Only need lhs from entity mentions not padding (cur_entity_id_labels is not padded so it gives us the amount of entity mentions)
             cur_ent_to_seq_attn = ent_to_seq_attn[doc_i][:, :len(cur_entity_id_labels), :] # [heads, n_ment, seq_len]
-            # cur_ent_to_ent_attn = ent_to_ent_attn[doc_i][:, :len(cur_entity_id_labels), :len(cur_entity_id_labels)] # [heads, n_ment, n_ment]
 
             ent_embeds, ent_seq_attn = [], []
             for ent_i in range(len(entity_pos[doc_i])): # For every entity in the document NOTE: (entity NOT mention). entity_pos is a list of lists of mentions for each entity [[mention1, mention2], [mention1], ...]

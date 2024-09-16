@@ -3,6 +3,7 @@ import transformers
 import const
 from utils import batch_to_device
 from tqdm import tqdm
+from evaluation import to_official, official_evaluate
 
 def load_optim_sched(model,
                      train_dataloader,
@@ -39,7 +40,7 @@ def train_epoch(model,
     with tqdm(train_dataloader, unit='batch') as tepoch:
         for batch in tepoch:
             tepoch.set_description(f'Train Epoch {cur_epoch + 1}/{num_epochs}')
-            batch = batch_to_device(batch, 'cuda')
+            batch = batch_to_device(batch, const.DEVICE)
 
             model.zero_grad()
 
@@ -69,7 +70,7 @@ def validate(model,
     with tqdm(dataloader, unit='batch') as vepoch:
         for batch in vepoch:
             vepoch.set_description(f"Validation")
-            batch = batch_to_device(batch, 'cuda')
+            batch = batch_to_device(batch, const.DEVICE)
 
             with torch.no_grad():
                 embeds, preds, _ = model(batch)
@@ -84,6 +85,9 @@ def validate(model,
                 for i in range(len(batch['labels'])):
                     labels.append(batch['labels'][i])
 
+    embeddings = torch.cat(embeddings, dim=0).to(torch.float32)
+    predictions = torch.cat(predictions, dim=0).to(torch.float32)
+
     return embeddings, predictions, labels
 
 
@@ -91,6 +95,8 @@ def validate(model,
 def train(model,
           train_dataloader,
           dev_dataloader,
+          dev_samples,
+          id2rel,
           num_epochs):
     
     optimizer, scheduler = load_optim_sched(model, train_dataloader, num_epochs)
@@ -99,3 +105,14 @@ def train(model,
     for epoch in range(num_epochs):
         cur_steps = train_epoch(model, optimizer, scheduler, train_dataloader, epoch, num_epochs, cur_steps)
         embeddings, predictions, labels = validate(model, dev_dataloader)
+
+        official_preds = to_official(preds=predictions,
+                                     samples=dev_samples,
+                                     id2rel=id2rel)
+        
+        if len(official_preds) > 0:
+            f1, _, f1_ign, _ = official_evaluate(official_preds, const.DATA_DIR)
+            print(f"Epoch {epoch + 1}/{num_epochs} F1: {f1:.4f} F1 Ign: {f1_ign:.4f}")
+        else:
+            print(f"No predictions made for epoch {epoch+1}...")
+            continue

@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 import const
+import params
 
 def encode(model,
            batch,
@@ -15,7 +16,7 @@ def encode(model,
     batch_seq_len = batch['input_ids'].size(-1)
     batch_entity_len = batch['entity_ids'].size(-1)
 
-    if batch_seq_len <= const.MAX_ENCODER_LENGTH:
+    if batch_seq_len <= params.MAX_ENCODER_LENGTH:
         # If batch sequence length in the batch is less than the max encoder length, we can just encode the batch as is.
         output = model(
             input_ids=batch['input_ids'],
@@ -59,9 +60,9 @@ def long_encode(model,
     doc_segments = [] # How many chunks for each document
 
     for doc_i, doc_len in enumerate(doc_lens): # Go through every document in the batch, checking if it needs to be chunked
-        if doc_len <= const.MAX_ENCODER_LENGTH: # No need to chunk
-            new_input_ids.append(batch['input_ids'][doc_i, :const.MAX_ENCODER_LENGTH])
-            new_attention_mask.append(batch['attention_mask'][doc_i, :const.MAX_ENCODER_LENGTH])
+        if doc_len <= params.MAX_ENCODER_LENGTH: # No need to chunk
+            new_input_ids.append(batch['input_ids'][doc_i, :params.MAX_ENCODER_LENGTH])
+            new_attention_mask.append(batch['attention_mask'][doc_i, :params.MAX_ENCODER_LENGTH])
             new_entity_ids.append(batch['entity_ids'][doc_i])
             new_entity_attention_mask.append(batch['entity_attention_mask'][doc_i])
             new_entity_position_ids.append(batch['entity_position_ids'][doc_i])
@@ -69,30 +70,30 @@ def long_encode(model,
 
             doc_segments.append(1)
         else: # Must chunk into two segments
-            input_ids1 = torch.cat([batch['input_ids'][doc_i, :const.MAX_ENCODER_LENGTH - end_tok_ids.size(0)], end_tok_ids], dim=-1) # First half token sequence, from start to max encoder length
-            attention_mask1 = batch['attention_mask'][doc_i, :const.MAX_ENCODER_LENGTH]
+            input_ids1 = torch.cat([batch['input_ids'][doc_i, :params.MAX_ENCODER_LENGTH - end_tok_ids.size(0)], end_tok_ids], dim=-1) # First half token sequence, from start to max encoder length
+            attention_mask1 = batch['attention_mask'][doc_i, :params.MAX_ENCODER_LENGTH]
 
-            input_ids2 = torch.cat([start_tok_ids, batch['input_ids'][doc_i, (doc_len - const.MAX_ENCODER_LENGTH + start_tok_ids.size(0)) : doc_len]], dim=-1) # Second half token sequence, from end to max encoder length
-            attention_mask2 =  batch['attention_mask'][doc_i, (doc_len - const.MAX_ENCODER_LENGTH) : doc_len]
+            input_ids2 = torch.cat([start_tok_ids, batch['input_ids'][doc_i, (doc_len - params.MAX_ENCODER_LENGTH + start_tok_ids.size(0)) : doc_len]], dim=-1) # Second half token sequence, from end to max encoder length
+            attention_mask2 =  batch['attention_mask'][doc_i, (doc_len - params.MAX_ENCODER_LENGTH) : doc_len]
 
             entity_ids1, entity_attention_mask1, entity_position_ids1, entity_id_labels1 = [], [], [], [] # First segment
             entity_ids2, entity_attention_mask2, entity_position_ids2, entity_id_labels2 = [], [], [], [] # Second segment
             for ment_i, entity_id in enumerate(batch['entity_id_labels'][doc_i]):
                 ment_tok_start = batch['entity_position_ids'][doc_i][ment_i][0] # Start position of entity mention in the document
 
-                if ment_tok_start < (const.MAX_ENCODER_LENGTH - end_tok_ids.size(0)): # Entity in the first segment
+                if ment_tok_start < (params.MAX_ENCODER_LENGTH - end_tok_ids.size(0)): # Entity in the first segment
                     entity_ids1.append(batch['entity_ids'][doc_i][ment_i])
                     entity_attention_mask1.append(batch['entity_attention_mask'][doc_i][ment_i])
                     entity_position_ids1.append(batch['entity_position_ids'][doc_i][ment_i])
-                    entity_position_ids1[-1][entity_position_ids1[-1] >= (const.MAX_ENCODER_LENGTH - end_tok_ids.size(0))] = const.PAD_IDS['entity_position_ids'] # Set out of bounds positions to -1
+                    entity_position_ids1[-1][entity_position_ids1[-1] >= (params.MAX_ENCODER_LENGTH - end_tok_ids.size(0))] = const.PAD_IDS['entity_position_ids'] # Set out of bounds positions to -1
                     entity_id_labels1.append(entity_id)
 
-                if ment_tok_start > (doc_len - const.MAX_ENCODER_LENGTH) and ment_tok_start < (const.MAX_DOC_LENGTH - end_tok_ids.size(0)): # Entity in the second segment
+                if ment_tok_start > (doc_len - params.MAX_ENCODER_LENGTH) and ment_tok_start < (params.MAX_DOC_LENGTH - end_tok_ids.size(0)): # Entity in the second segment
                     entity_ids2.append(batch['entity_ids'][doc_i][ment_i])
                     entity_attention_mask2.append(batch['entity_attention_mask'][doc_i][ment_i])
                     entity_position_ids2.append(batch['entity_position_ids'][doc_i][ment_i])
-                    entity_position_ids2[-1] -= (doc_len - const.MAX_ENCODER_LENGTH) # Reorienting position indexes with second segment start indexes. This will set -1s to below -1, adjusting for this in the subsequent line
-                    entity_position_ids2[-1][torch.logical_or(entity_position_ids2[-1] >= (const.MAX_DOC_LENGTH - end_tok_ids.size(0)), entity_position_ids2[-1] < 0)] = const.PAD_IDS['entity_position_ids'] # set out of bounds positions to -1
+                    entity_position_ids2[-1] -= (doc_len - params.MAX_ENCODER_LENGTH) # Reorienting position indexes with second segment start indexes. This will set -1s to below -1, adjusting for this in the subsequent line
+                    entity_position_ids2[-1][torch.logical_or(entity_position_ids2[-1] >= (params.MAX_DOC_LENGTH - end_tok_ids.size(0)), entity_position_ids2[-1] < 0)] = const.PAD_IDS['entity_position_ids'] # set out of bounds positions to -1
                     entity_id_labels2.append(entity_id)
 
                 # else: Entity is in neither segment, ignore it. 
@@ -180,10 +181,10 @@ def recombine_chunks(doc_lens,
     
     for (doc_seg, doc_seq_len) in zip(doc_segments, doc_lens):
         if doc_seg == 1:
-            new_seq_lhs.append(F.pad(seq_lhs[i], (0, 0, 0, batch_seq_len - const.MAX_ENCODER_LENGTH)))
+            new_seq_lhs.append(F.pad(seq_lhs[i], (0, 0, 0, batch_seq_len - params.MAX_ENCODER_LENGTH)))
             new_ent_lhs.append(ent_lhs[i])
 
-            new_ent_to_seq_attn.append(F.pad(ent_to_seq_attn[i], (0, batch_seq_len - const.MAX_ENCODER_LENGTH)))
+            new_ent_to_seq_attn.append(F.pad(ent_to_seq_attn[i], (0, batch_seq_len - params.MAX_ENCODER_LENGTH)))
             new_ent_to_ent_attn.append(ent_to_ent_attn[i])
 
             new_entity_id_labels.append(entity_id_labels[i])
@@ -194,17 +195,17 @@ def recombine_chunks(doc_lens,
             new_entity_len = max(new_entity_len, len(entity_id_labels_combined))
 
             # -- ATTENTION MASK COMBINATION --
-            attn_mask1 = attention_mask[i][:const.MAX_ENCODER_LENGTH - end_tok_ids.size(0)]
-            attn_mask1 = F.pad(attn_mask1, (0, batch_seq_len - const.MAX_ENCODER_LENGTH + end_tok_ids.size(0)))
+            attn_mask1 = attention_mask[i][:params.MAX_ENCODER_LENGTH - end_tok_ids.size(0)]
+            attn_mask1 = F.pad(attn_mask1, (0, batch_seq_len - params.MAX_ENCODER_LENGTH + end_tok_ids.size(0)))
             attn_mask2 = attention_mask[i + 1][start_tok_ids.size(0):]
-            attn_mask2 = F.pad(attn_mask2, (doc_seq_len - const.MAX_ENCODER_LENGTH + start_tok_ids.size(0), batch_seq_len - doc_seq_len))
+            attn_mask2 = F.pad(attn_mask2, (doc_seq_len - params.MAX_ENCODER_LENGTH + start_tok_ids.size(0), batch_seq_len - doc_seq_len))
             attn_mask = attn_mask1 + attn_mask2 + 1e-10
 
             # -- BASE SEQUENCE HIDDEN STATES COMBINATION --
-            seq_hs1 = seq_lhs[i][:const.MAX_ENCODER_LENGTH - end_tok_ids.size(0)]
-            seq_hs1 = F.pad(seq_hs1, (0, 0, 0, batch_seq_len - const.MAX_ENCODER_LENGTH + end_tok_ids.size(0)))
+            seq_hs1 = seq_lhs[i][:params.MAX_ENCODER_LENGTH - end_tok_ids.size(0)]
+            seq_hs1 = F.pad(seq_hs1, (0, 0, 0, batch_seq_len - params.MAX_ENCODER_LENGTH + end_tok_ids.size(0)))
             seq_hs2 = seq_lhs[i + 1][start_tok_ids.size(0):]
-            seq_hs2 = F.pad(seq_hs2, (0, 0, doc_seq_len - const.MAX_ENCODER_LENGTH + start_tok_ids.size(0), batch_seq_len - doc_seq_len))
+            seq_hs2 = F.pad(seq_hs2, (0, 0, doc_seq_len - params.MAX_ENCODER_LENGTH + start_tok_ids.size(0), batch_seq_len - doc_seq_len))
             seq_hs = (seq_hs1 + seq_hs2) / attn_mask.unsqueeze(-1)
 
             # -- ENTITY HIDDEN STATES COMBINATION --
@@ -212,11 +213,11 @@ def recombine_chunks(doc_lens,
             ent_hs = F.pad(ent_hs, (0, 0, 0, new_entity_len - len(entity_id_labels_combined))) # Pad to maximum entity length compared to original entity length
 
             # -- ENTITY TO BASE SEQUENCE ATTENTION COMBINATION --
-            ent_seq_attn1 = ent_to_seq_attn[i][:, :len(entity_id_labels[i]), :const.MAX_ENCODER_LENGTH - end_tok_ids.size(0)] 
-            ent_seq_attn1 = F.pad(ent_seq_attn1, (0, batch_seq_len - const.MAX_ENCODER_LENGTH + end_tok_ids.size(0), 0, new_entity_len - len(entity_id_labels[i])))
+            ent_seq_attn1 = ent_to_seq_attn[i][:, :len(entity_id_labels[i]), :params.MAX_ENCODER_LENGTH - end_tok_ids.size(0)] 
+            ent_seq_attn1 = F.pad(ent_seq_attn1, (0, batch_seq_len - params.MAX_ENCODER_LENGTH + end_tok_ids.size(0), 0, new_entity_len - len(entity_id_labels[i])))
 
             ent_seq_attn2 = ent_to_seq_attn[i + 1][:, :len(entity_id_labels[i + 1]), start_tok_ids.size(0):] # pad entity attentions before combining, pad zeros before for attn 1 and after for attn 2
-            ent_seq_attn2 = F.pad(ent_seq_attn2, (doc_seq_len - const.MAX_ENCODER_LENGTH + start_tok_ids.size(0), batch_seq_len - doc_seq_len, len(entity_id_labels[i]), new_entity_len - len(entity_id_labels_combined)))
+            ent_seq_attn2 = F.pad(ent_seq_attn2, (doc_seq_len - params.MAX_ENCODER_LENGTH + start_tok_ids.size(0), batch_seq_len - doc_seq_len, len(entity_id_labels[i]), new_entity_len - len(entity_id_labels_combined)))
 
             ent_seq_attn = (ent_seq_attn1 + ent_seq_attn2)
             ent_seq_attn = ent_seq_attn / (ent_seq_attn.sum(-1, keepdim=True) + 1e-10)

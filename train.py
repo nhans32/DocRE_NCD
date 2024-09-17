@@ -4,11 +4,11 @@ import const
 from utils import batch_to_device
 from tqdm import tqdm
 from evaluation import to_official, official_evaluate
+import params
 
 def load_optim_sched(model,
                      train_dataloader,
-                     num_epochs,
-                     warmup_ratio=const.WARMUP_RATIO):
+                     num_epochs):
     # -- OPTIMIZER --
     encoder_params = ['luke_model'] # Want to set lr on base model to 3e-5, and rest of model to 1e-4 with eps 1e-6
     optimizer = torch.optim.AdamW([
@@ -18,7 +18,7 @@ def load_optim_sched(model,
 
     # -- SCHEDULER --
     total_steps = int(len(train_dataloader) * num_epochs)
-    warmup_steps = int(total_steps * warmup_ratio)
+    warmup_steps = int(total_steps * params.WARMUP_RATIO)
     scheduler = transformers.optimization.get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
 
     return optimizer, scheduler
@@ -48,7 +48,7 @@ def train_epoch(model,
 
             loss.backward()
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), const.MAX_GRAD_NORM)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), params.MAX_GRAD_NORM)
             optimizer.step()
             scheduler.step()
 

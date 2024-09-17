@@ -4,6 +4,7 @@ import numpy as np
 import json
 from tqdm import tqdm
 import const
+import params
 
 
 
@@ -103,7 +104,7 @@ def read_docred(fp, tokenizer, rel2id):
                         rel_vect = [1] + [0] * (len(rel2id) - 1) # NA relation
                     labels.append(rel_vect)
         
-        sents = sents[:const.MAX_DOC_LENGTH - 2]
+        sents = sents[:params.MAX_DOC_LENGTH - 2]
         input_ids = tokenizer.convert_tokens_to_ids(sents)
         input_ids = tokenizer.build_inputs_with_special_tokens(input_ids)
 

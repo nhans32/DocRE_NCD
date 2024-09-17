@@ -54,7 +54,7 @@ def collate_fn(batch):
 
 
 
-def read_docred(fp, tokenizer, rel2id, max_seq_length=const.MAX_DOC_LENGTH):
+def read_docred(fp, tokenizer, rel2id):
     # NOTE: Entity positions now are accurate, no need to offset in collate_fn.
     docs = json.load(open(fp))
     samples = []
@@ -103,7 +103,7 @@ def read_docred(fp, tokenizer, rel2id, max_seq_length=const.MAX_DOC_LENGTH):
                         rel_vect = [1] + [0] * (len(rel2id) - 1) # NA relation
                     labels.append(rel_vect)
         
-        sents = sents[:max_seq_length - 2]
+        sents = sents[:const.MAX_DOC_LENGTH - 2]
         input_ids = tokenizer.convert_tokens_to_ids(sents)
         input_ids = tokenizer.build_inputs_with_special_tokens(input_ids)
 

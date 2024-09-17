@@ -28,7 +28,7 @@ def encode(model,
         seq_lhs = output['last_hidden_state']
         ent_lhs = output['entity_last_hidden_state']
 
-        attn = output['attentions'][-1] # Only getting last layer of attention [batch_n, num_heads, seq_len + ent_len, seq_len + ent_len]. NOTE: Could expand this to last n layers (per other papers).
+        attn = output['attentions'][-1] # Only getting last layer of attention [batch_n, num_heads, seq_len + ent_len, seq_len + ent_len].
         ent_to_seq_attn = attn[:, :, seq_lhs.shape[1]:(seq_lhs.shape[1] + ent_lhs.shape[1]), :seq_lhs.shape[1]] # Get entity to base sequence attention values
         ent_to_ent_attn = attn[:, :, seq_lhs.shape[1]:(seq_lhs.shape[1] + ent_lhs.shape[1]), seq_lhs.shape[1]:(seq_lhs.shape[1] + ent_lhs.shape[1])] # Get entity to entity attention values
         

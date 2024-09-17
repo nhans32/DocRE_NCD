@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from opt_einsum import contract
-from transformers import AutoModel, AutoTokenizer
+from transformers import LukeModel
 import torch.nn.functional as F
 import json
 import const
@@ -36,12 +36,12 @@ class DocRedModel(nn.Module):
         self.max_labels = max_labels
         self.num_class = num_class
 
-        self.luke_model = AutoModel.from_pretrained(self.model_name) # Base model
+        self.luke_model = LukeModel.from_pretrained(self.model_name) # Base model
         self.head_extractor = nn.Linear(2 * self.hidden_size, self.embed_size)
         self.tail_extractor = nn.Linear(2 * self.hidden_size, self.embed_size)
-        self.bilinear = nn.Linear(self.embed_size * self.block_size, self.out_embed_size)
+        self.bilinear = nn.Linear(self.embed_size * self.block_size, self.num_class)
 
-        self.classifier_head = nn.Linear(self.out_embed_size, self.num_class)
+        # self.classifier_head = nn.Linear(self.out_embed_size, self.num_class)
 
     def hrt_pool(self,
                  seq_lhs,
@@ -137,7 +137,7 @@ class DocRedModel(nn.Module):
     
     def forward(self, batch):
         embeds = self.embed(batch)
-        logits = self.classifier_head(embeds)
+        logits = embeds
 
         preds = self.atloss_fn.get_label(logits.float(), num_labels=self.max_labels)
 

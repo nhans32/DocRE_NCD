@@ -20,7 +20,7 @@ def to_official(preds,
     res = []
     for i in range(preds.shape[0]):
         pred = preds[i]
-        pred = torch.nonzero(pred)[0].tolist()
+        pred = torch.nonzero(pred).flatten().tolist()
         for p in pred:
             if p != 0:
                 res.append(

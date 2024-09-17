@@ -57,7 +57,7 @@ def train_epoch(model,
             cur_steps += 1
             batch_i += 1
 
-            tepoch.set_postfix(loss=running_loss / batch_i)
+            tepoch.set_postfix(run_loss=running_loss / batch_i, cur_loss=loss.item())
     return cur_steps
 
 
@@ -112,7 +112,14 @@ def train(model,
         
         if len(official_preds) > 0:
             f1, _, f1_ign, _ = official_evaluate(official_preds, const.DATA_DIR)
-            print(f"Epoch {epoch + 1}/{num_epochs} F1: {f1:.4f} F1 Ign: {f1_ign:.4f}")
+            print(f"Epoch {epoch+1}/{num_epochs} F1: {f1:.4f} F1 Ign: {f1_ign:.4f}")
+            with open("/data2/nhanse02/thesis/models/res.txt", "a") as f:
+                f.write(f"Epoch {epoch+1}: {f1:.4f} {f1_ign:.4f}\n")
         else:
             print(f"No predictions made for epoch {epoch+1}...")
-            continue
+            with open("/data2/nhanse02/thesis/models/res.txt", "a") as f:
+                f.write(f"Epoch {epoch+1}: NO PREDICTIONS\n")
+        
+        # Save model every 5 epochs
+        if (epoch+1) % 5 == 0:
+            torch.save(model.state_dict(), f"/data2/nhanse02/thesis/models/model_epoch_{epoch+1}.pt")

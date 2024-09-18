@@ -2,6 +2,9 @@ LUKE_BASE = 'studio-ousia/luke-base'
 LUKE_LARGE = 'studio-ousia/luke-large'
 LUKE_LARGE_TACRED = 'studio-ousia/luke-large-finetuned-tacred'
 
+MODE_CONTRASTIVE = 'contrastive'
+MODE_CLASSIFICATION = 'classification'
+
 DEVICE = 'cuda:1'
 DATA_DIR = '/data2/nhanse02/thesis/data'
 

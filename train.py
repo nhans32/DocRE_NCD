@@ -3,7 +3,7 @@ import transformers
 import const
 from utils import batch_to_device
 from tqdm import tqdm
-from evaluation import to_official, official_evaluate
+from eval_official import to_official, official_evaluate
 import params
 
 def load_optim_sched(model,

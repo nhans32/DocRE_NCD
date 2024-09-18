@@ -16,6 +16,8 @@ class DocRedModel(nn.Module):
                  num_class,
                  embed_size=768, # Intermediary embedding for head and tail entities
                  out_embed_size=768, # Final embedding for the relationship
+                 projection_size=128,
+                 contrastive_tmp=0.01,
                  max_labels=4, # Max number of classes to predict for one entity pair
                  block_size=64):
         super(DocRedModel, self).__init__()
@@ -24,24 +26,33 @@ class DocRedModel(nn.Module):
             raise ValueError(f'Invalid encoder name: {model_name}')
         self.model_name = model_name
 
-        self.start_tok_ids = [tokenizer.cls_token_id]
-        self.end_tok_ids = [tokenizer.sep_token_id]
+        self.start_tok_ids = [tokenizer.cls_token_id] # list of token ids that indicate the start of an input sequence
+        self.end_tok_ids = [tokenizer.sep_token_id] # list of token ids that indicate the end of an input sequence
 
         self.embed_size = embed_size
         self.block_size = block_size
         self.hidden_size = 768 if self.model_name == const.LUKE_BASE else 1024
         self.out_embed_size = out_embed_size
+        self.projection_size = projection_size
 
         self.atloss_fn = ATLoss()
+        self.posclassloss_fn = nn.BCEWithLogitsLoss()
+        self.contrloss_fn = F.cross_entropy()
+
+        self.contrastive_tmp = contrastive_tmp
+
         self.max_labels = max_labels
         self.num_class = num_class
 
         self.luke_model = LukeModel.from_pretrained(self.model_name) # Base model
         self.head_extractor = nn.Linear(2 * self.hidden_size, self.embed_size)
         self.tail_extractor = nn.Linear(2 * self.hidden_size, self.embed_size)
-        self.bilinear = nn.Linear(self.embed_size * self.block_size, self.num_class)
+        self.bilinear = nn.Linear(self.embed_size * self.block_size, self.out_embed_size)
 
-        # self.classifier_head = nn.Linear(self.out_embed_size, self.num_class)
+        self.classifier_head = nn.Linear(self.out_embed_size, self.num_class)
+
+        self.projection_head = nn.Linear(self.out_embed_size, self.projection_size)
+
 
     def hrt_pool(self,
                  seq_lhs,
@@ -105,6 +116,7 @@ class DocRedModel(nn.Module):
 
         return hss, tss, rel_seq_embeds
         
+
     def embed(self, batch):
         seq_lhs, ent_lhs, ent_to_seq_attn, ent_to_ent_attn, entity_id_labels = encode(model=self.luke_model,
                                                                                       batch=batch,
@@ -133,18 +145,42 @@ class DocRedModel(nn.Module):
 
         embeds = self.bilinear(bl)
 
-        return embeds
+        # Classification head for supervised learning
+        class_logits = self.classifier_head(embeds) 
+
+        # Projection head for SimCSE
+        proj_logits = torch.tanh(self.projection_head(embeds)) 
+
+        return embeds, class_logits, proj_logits
     
-    def forward(self, batch):
-        embeds = self.embed(batch)
-        logits = embeds
 
-        preds = self.atloss_fn.get_label(logits.float(), num_labels=self.max_labels)
+    def forward(self,
+                batch,
+                mode):
+        
+        sup_loss = None
+        contr_loss = None
 
-        loss = None
+        embeds, class_logits, proj_logits1 = self.embed(batch)
+
+        if mode == const.MODE_CONTRASTIVE:
+            _, _, proj_logits2 = self.embed(batch) # Forward pass 2 - Done for ensuring different dropout masks are applied (sufficient augmentation)
+
+            sim_matrix = F.cosine_similarity(proj_logits1.unsqueeze(1), proj_logits2.unsqueeze(0), dim=-1) # Calculate cosine similarity between all pairs of embeddings
+            sim_matrix = sim_matrix / self.contrastive_tmp
+            contr_labels = torch.arange(sim_matrix.size(0)).long().to(const.DEVICE)
+            contr_loss = self.contrloss_fn(sim_matrix, contr_labels)
+
+        preds = self.atloss_fn.get_label(class_logits.float(), num_labels=self.max_labels)
+
         if batch['labels'] is not None:
             labels = [torch.tensor(l) for l in batch['labels']]
-            labels = torch.cat(labels, dim=0).float().to(logits)
-            loss = self.atloss_fn(logits.float(), labels.float())
+            labels = torch.cat(labels, dim=0).float().to(class_logits)
+            sup_loss = self.atloss_fn(class_logits.float(), labels.float())
 
-        return embeds, preds, loss
+        losses = {
+            'sup_loss': sup_loss,
+            'contr_loss': contr_loss
+        }
+
+        return embeds, preds, losses

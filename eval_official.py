@@ -1,5 +1,5 @@
 # FROM: https://github.com/wzhouad/ATLOP/blob/main/evaluation.py
-
+# NOTE: ONLY USED TO EVALUATE MODEL WITH NO HOLDOUTS
 import os
 import os.path
 import json

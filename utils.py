@@ -4,8 +4,12 @@ import numpy as np
 import json
 from tqdm import tqdm
 import const
-import params
-from umap import UMAP
+
+def print_dict(d):
+    for k, v in d.items():
+        print(f'{k}: {v:.4f}')
+
+
 
 def set_seed(seed):
     random.seed(seed)
@@ -37,7 +41,7 @@ def collate_fn(batch):
     entity_id_labels = [[e_i for e_i, e_ments in enumerate(x['entity_pos']) for ment in e_ments] for x in batch]
     
     labels = [x['labels'] for x in batch]
-    original_labels = [x['original_labels'] for x in batch]
+    labels_original = [x['labels_original'] for x in batch]
     entity_pos = [x['entity_pos'] for x in batch]
     hts = [x['hts'] for x in batch]
 
@@ -49,7 +53,7 @@ def collate_fn(batch):
         'entity_position_ids': torch.tensor(entity_position_ids),
         'entity_id_labels': entity_id_labels, # For each mention, the entity index/id it belongs to
         'labels': labels,
-        'original_labels': original_labels,
+        'labels_original': labels_original,
         'entity_pos': entity_pos,
         'hts': hts,
     }
@@ -105,7 +109,7 @@ def read_docred(fp, tokenizer, rel2id):
                         rel_vect = [1] + [0] * (len(rel2id) - 1) # NA relation
                     labels.append(rel_vect)
         
-        sents = sents[:params.MAX_DOC_LENGTH - 2]
+        sents = sents[:const.MAX_DOC_LENGTH - 2]
         input_ids = tokenizer.convert_tokens_to_ids(sents)
         input_ids = tokenizer.build_inputs_with_special_tokens(input_ids)
 
@@ -113,7 +117,7 @@ def read_docred(fp, tokenizer, rel2id):
             'input_ids': input_ids, # [CLS] + document tokens + [SEP]
             'entity_pos': entity_pos, # List of entities, each entity is a list of mention positions for the entity in the form of (start, end)
             'labels': labels if len(labels) > 0 else None, # List of labels for each entity pair, in the form of a vector. Modified by remove_holdouts
-            'original_labels': labels if len(labels) > 0 else None, # This is to preserve the original labels for evaluation
+            'labels_original': labels if len(labels) > 0 else None, # This is to preserve the original labels for evaluation
             'hts': hts, # List of all entity pairs
             'title': doc['title'], # Title of document (for evaluation script)
         }
@@ -135,7 +139,7 @@ def get_holdouts(train_samples,
                  dev_samples, 
                  rel2id, 
                  id2rel,
-                 min_train_indiv=100, # minimum number of instances where the relationship appears individually (without coocurence with another relationship)
+                 min_train_indiv=100, # Minimum number of instances where the relationship appears individually (without coocurence with another relationship)
                  min_dev_indiv=50):
     
     train_indiv_labels = []
@@ -183,9 +187,9 @@ def remove_holdouts(samples,
     if len(holdout_rels) == 0:
         return samples, rel2id, id2rel
     
-    rel2id_holdout = {k: v for k, v in rel2id.items() if k not in holdout_rels and v != 0}
+    rel2id_holdout = {k: v for k, v in rel2id.items() if k not in holdout_rels and v != 0} # create without Na
     rel2id_holdout = {k: i+1 for i, (k, v) in enumerate(rel2id_holdout.items())}
-    rel2id_holdout['Na'] = 0
+    rel2id_holdout['Na'] = 0 # Readd Na
 
     id2rel_holdout = {v: k for k, v in rel2id_holdout.items()}
 
@@ -198,17 +202,9 @@ def remove_holdouts(samples,
             for i, x in enumerate(label):
                 if x == 1 and index_switch[i] is not None:
                     new_label[index_switch[i]] = 1
-            if sum(new_label) == 0:
+            if sum(new_label) == 0: # if no label is present, then it is a NA relationship
                 new_label[0] = 1
             new_labels.append(new_label)
         doc['labels'] = new_labels
 
     return samples, rel2id_holdout, id2rel_holdout
-
-
-
-def dim_reduce(embeddings,
-               n_components=2,
-               n_neighbors=30):
-    dimred_embeddings = UMAP(n_components=n_components, n_neighbors=n_neighbors, min_dist=0, n_jobs=-1).fit_transform(embeddings)
-    return dimred_embeddings

@@ -22,7 +22,7 @@ class DocRedModel(nn.Module):
                  block_size=64):
         super(DocRedModel, self).__init__()
 
-        if model_name not in [const.LUKE_BASE, const.LUKE_LARGE, const.LUKE_LARGE_TACRED]:
+        if model_name not in set([const.LUKE_BASE, const.LUKE_LARGE, const.LUKE_LARGE_TACRED]):
             raise ValueError(f'Invalid encoder name: {model_name}')
         self.model_name = model_name
 
@@ -158,6 +158,13 @@ class DocRedModel(nn.Module):
                 batch,
                 mode):
         
+        if mode not in set([const.MODE_SUPERVISED, const.MODE_CONTRASTIVE]):
+            raise ValueError(f'Invalid mode: {mode}')
+
+        labels = [torch.tensor(l) for l in batch['labels']]
+        labels = torch.cat(labels, dim=0).float().to(const.DEVICE)
+
+        update_loss = None
         sup_loss = None
         contr_loss = None
 
@@ -171,16 +178,22 @@ class DocRedModel(nn.Module):
             contr_labels = torch.arange(sim_matrix.size(0)).long().to(const.DEVICE)
             contr_loss = self.contrloss_fn(sim_matrix, contr_labels)
 
+            update_loss = contr_loss
+
+        elif mode == const.MODE_SUPERVISED: 
+            sup_loss = self.atloss_fn(class_logits.float(), labels.float())
+            
+            update_loss = sup_loss
+
+        if update_loss is None:
+            raise ValueError('Loss to update is None')
+
         preds = self.atloss_fn.get_label(class_logits.float(), num_labels=self.max_labels)
 
-        if batch['labels'] is not None:
-            labels = [torch.tensor(l) for l in batch['labels']]
-            labels = torch.cat(labels, dim=0).float().to(class_logits)
-            sup_loss = self.atloss_fn(class_logits.float(), labels.float())
-
         losses = {
-            'sup_loss': sup_loss,
-            'contr_loss': contr_loss
+            'update_loss': update_loss, # Dynamically update loss based on mode
+            'sup_loss': sup_loss if sup_loss else torch.tensor(-1).to(const.DEVICE),
+            'contr_loss': contr_loss if contr_loss else torch.tensor(-1).to(const.DEVICE)
         }
 
         return embeds, preds, losses

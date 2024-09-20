@@ -62,7 +62,9 @@ def gen_train_facts(data_file_name, truth_dir):
 
 
 
-def official_evaluate(official_preds, data_dir):
+def official_evaluate(official_preds, 
+                      data_dir,
+                      stats_save_path=None):
     '''
         Adapted from the official evaluation code
     '''
@@ -172,4 +174,9 @@ def official_evaluate(official_preds, data_dir):
     else:
         re_f1_ignore_train = 2.0 * re_p_ignore_train * re_r / (re_p_ignore_train + re_r)
 
-    return re_f1, evi_f1, re_f1_ignore_train_annotated, re_f1_ignore_train
+    stats = {
+        'f1': re_f1,
+        'f1_ign': re_f1_ignore_train_annotated
+    }
+
+    return stats

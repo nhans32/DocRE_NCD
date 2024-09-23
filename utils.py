@@ -4,10 +4,10 @@ import numpy as np
 import json
 from tqdm import tqdm
 import const
+import os
 
 def print_dict(d):
-    for k, v in d.items():
-        print(f'{k}: {v:.4f}')
+    print(json.dumps(d, indent=2))
 
 
 
@@ -166,7 +166,7 @@ def get_holdouts(train_samples,
     holdout_rel_batches = [holdout_rels[i:i+6] for i in range(0, 30, 6)]
     holdout_id_batches = [[rel2id[r] for r in rel_batch] for rel_batch in holdout_rel_batches]
 
-    with open('out/holdout_info.json', 'w') as f: # Dump holdout relationship information
+    with open(os.path.join('out', 'holdout_info.json'), 'w') as f: # Dump holdout relationship information
         json.dump({
             'holdout_rel_batches': holdout_rel_batches,
             'holdout_id_batches': holdout_id_batches,

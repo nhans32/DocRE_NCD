@@ -14,10 +14,10 @@ class DocRedModel(nn.Module):
                  model_name,
                  tokenizer,
                  num_class,
+                 contrastive_tmp,
                  embed_size=768, # Intermediary embedding for head and tail entities
                  out_embed_size=768, # Final embedding for the relationship
                  projection_size=128,
-                 contrastive_tmp=0.01,
                  max_labels=4, # Max number of classes to predict for one entity pair
                  block_size=64):
         super(DocRedModel, self).__init__()
@@ -37,7 +37,7 @@ class DocRedModel(nn.Module):
 
         self.atloss_fn = ATLoss()
         self.posclassloss_fn = nn.BCEWithLogitsLoss()
-        self.contrloss_fn = F.cross_entropy()
+        self.contrloss_fn = F.cross_entropy
 
         self.contrastive_tmp = contrastive_tmp
 
@@ -66,7 +66,7 @@ class DocRedModel(nn.Module):
         hss, tss, rel_seq_embeds = [], [], []
 
         for doc_i in range(batch_size): # For every document in batch
-            cur_entity_id_labels = torch.tensor(entity_id_labels[doc_i]) # Get the tensor slices for the document, removing padding
+            cur_entity_id_labels = torch.tensor(entity_id_labels[doc_i]) # Get the tensor slices for the document entities, removing padding
             cur_ent_lhs = ent_lhs[doc_i][:len(cur_entity_id_labels)] # Only need lhs from entity mentions not padding (cur_entity_id_labels is not padded so it gives us the amount of entity mentions)
             cur_ent_to_seq_attn = ent_to_seq_attn[doc_i][:, :len(cur_entity_id_labels), :] # [heads, n_ment, seq_len]
 
@@ -156,7 +156,8 @@ class DocRedModel(nn.Module):
 
     def forward(self,
                 batch,
-                mode):
+                mode,
+                train):
         
         if mode not in set([const.MODE_SUPERVISED, const.MODE_CONTRASTIVE]):
             raise ValueError(f'Invalid mode: {mode}')
@@ -170,28 +171,29 @@ class DocRedModel(nn.Module):
 
         embeds, class_logits, proj_logits1 = self.embed(batch)
 
-        if mode == const.MODE_CONTRASTIVE:
-            _, _, proj_logits2 = self.embed(batch) # Forward pass 2 - Done for ensuring different dropout masks are applied (sufficient augmentation)
+        if train:
+            if mode == const.MODE_CONTRASTIVE:
+                _, _, proj_logits2 = self.embed(batch) # Forward pass 2 - Done for ensuring different dropout masks are applied (sufficient augmentation)
 
-            sim_matrix = F.cosine_similarity(proj_logits1.unsqueeze(1), proj_logits2.unsqueeze(0), dim=-1) # Calculate cosine similarity between all pairs of embeddings
-            sim_matrix = sim_matrix / self.contrastive_tmp
-            contr_labels = torch.arange(sim_matrix.size(0)).long().to(const.DEVICE)
-            contr_loss = self.contrloss_fn(sim_matrix, contr_labels)
+                sim_matrix = F.cosine_similarity(proj_logits1.unsqueeze(1), proj_logits2.unsqueeze(0), dim=-1) # Calculate cosine similarity between all pairs of embeddings
+                sim_matrix = sim_matrix / self.contrastive_tmp
+                contr_labels = torch.arange(sim_matrix.size(0)).long().to(const.DEVICE)
+                contr_loss = self.contrloss_fn(sim_matrix, contr_labels)
 
-            update_loss = contr_loss
+                update_loss = contr_loss
 
-        elif mode == const.MODE_SUPERVISED: 
-            sup_loss = self.atloss_fn(class_logits.float(), labels.float())
-            
-            update_loss = sup_loss
+            elif mode == const.MODE_SUPERVISED: 
+                sup_loss = self.atloss_fn(class_logits.float(), labels.float())
+                
+                update_loss = sup_loss
 
-        if update_loss is None:
-            raise ValueError('Loss to update is None')
+            if update_loss is None:
+                raise ValueError('Loss to update is None')
 
         preds = self.atloss_fn.get_label(class_logits.float(), num_labels=self.max_labels)
 
         losses = {
-            'update_loss': update_loss, # Dynamically update loss based on mode
+            'update_loss': update_loss if update_loss else torch.tensor(-1).to(const.DEVICE), # Dynamically update loss based on mode
             'sup_loss': sup_loss if sup_loss else torch.tensor(-1).to(const.DEVICE),
             'contr_loss': contr_loss if contr_loss else torch.tensor(-1).to(const.DEVICE)
         }

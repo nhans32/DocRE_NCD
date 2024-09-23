@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from utils import collate_fn
 import os
 from eval_contrastive import contrastive_evaluate
-from eval import print_dict
+from utils import print_dict
 import json
 
 def load_optim_sched(model,
@@ -45,12 +45,12 @@ def train_epoch(model,
     model.train()
     with tqdm(train_dataloader, unit='batch') as tepoch:
         for batch in tepoch:
-            tepoch.set_description(f'Train Epoch {cur_epoch + 1}/{num_epochs}')
+            tepoch.set_description(f'Train Epoch {cur_epoch+1}/{num_epochs}')
             batch = batch_to_device(batch, const.DEVICE)
 
             model.zero_grad()
 
-            _, _, losses = model(batch=batch, mode=mode)
+            _, _, losses = model(batch=batch, mode=mode, train=True)
 
             losses['update_loss'].backward()
 
@@ -81,7 +81,7 @@ def validate_epoch(model,
             batch = batch_to_device(batch, const.DEVICE)
 
             with torch.no_grad():
-                embeds, preds, _ = model(batch=batch, mode=mode)
+                embeds, preds, _ = model(batch=batch, mode=mode, train=False)
 
                 preds = preds.cpu()
                 embeds = embeds.cpu()
@@ -108,13 +108,11 @@ def train(model,
           dev_dataloader,
           train_samples,
           dev_samples,
-          rel2id_holdout,
           id2rel_holdout,
-          rel2id_original,
           id2rel_original,
           num_epochs,
           mode,
-          out_path):
+          out_dir):
     
     optimizer, scheduler = load_optim_sched(model, train_dataloader, num_epochs)
 
@@ -124,12 +122,12 @@ def train(model,
                                       collate_fn=collate_fn, 
                                       drop_last=dev_dataloader.drop_last) # (Only used in contrastive) Need new dataloader to validate over training data, i.e. drop_last=False. Want the Dataloader attributes of dev_dataloader just applied to train_samples
 
-    # Make directory stuctures if it doesn't already exist
-    checkpoint_dir = os.path.join(out_path, 'checkpoints')
-    stats_dir = os.path.join(out_path, 'stats')
-    plots_dir = os.path.join(out_path, 'plots')
-    if out_path is not None:
-        os.makedirs(out_path, exist_ok=True)
+    # Create directory stuctures if it doesn't already exist
+    checkpoint_dir = os.path.join(out_dir, 'checkpoints')
+    stats_dir = os.path.join(out_dir, 'stats')
+    plots_dir = os.path.join(out_dir, 'plots')
+    if out_dir is not None:
+        os.makedirs(out_dir, exist_ok=True)
         os.makedirs(checkpoint_dir, exist_ok=True)
         os.makedirs(stats_dir, exist_ok=True)
         os.makedirs(plots_dir, exist_ok=True)
@@ -138,21 +136,24 @@ def train(model,
     stats = []
     best_stat = -1
     for epoch in range(num_epochs):
-        cur_steps = train_epoch(model, optimizer, scheduler, train_dataloader, epoch, num_epochs, cur_steps, mode)
-
         # -- SUPERVISED VALIDATION --
         if mode == const.MODE_SUPERVISED:
+            cur_steps = train_epoch(model, optimizer, scheduler, train_dataloader, epoch, num_epochs, cur_steps, mode)
+
             _, predictions, _, _ = validate_epoch(model, dev_dataloader, mode)
             official_predictions = to_official(preds=predictions,
                                                samples=dev_samples,
                                                id2rel=id2rel_holdout)
             if len(official_predictions) > 0:
                 official_stats = official_evaluate(official_predictions, const.DATA_DIR)
+                print(f"-- VALIDATION RESULTS (EPOCH {epoch+1}) --")
                 print_dict(official_stats)
                 stats.append(official_stats)
 
                 if official_stats['f1_ign'] > best_stat: # If achieve higher F1 score, save model
-                    torch.save(model.state_dict(), os.path.join(checkpoint_dir, f'best_checkpoint.pt'))
+                    for f in os.listdir(checkpoint_dir): # empty the checkpoint directory
+                        os.remove(os.path.join(checkpoint_dir, f))
+                    torch.save(model.state_dict(), os.path.join(checkpoint_dir, f'best-checkpoint_epoch-{epoch}.pt'))
                     best_stat = official_stats['f1_ign']
             else:
                 print(f"No predictions made...")
@@ -160,18 +161,34 @@ def train(model,
 
         # -- CONTRASTIVE VALIDATION --
         elif mode == const.MODE_CONTRASTIVE: # We don't care about performance on dev set for contrastive learning, we just want the embeddings for the training set
+            if epoch == 0: # Just to see how the model performs on the training set before training
+                embeddings, _, labels, labels_original = validate_epoch(model, val_train_dataloader, mode)
+                contr_stats = contrastive_evaluate(embeddings=embeddings, 
+                                                   labels=labels,
+                                                   labels_original=labels_original,
+                                                   id2rel_original=id2rel_original,
+                                                   plot_save_path=os.path.join(plots_dir, f'contr_epoch-pre.png'))
+                print(f"-- VALIDATION RESULTS (PRELIMINARY) --")
+                print_dict(contr_stats)
+                stats.append(contr_stats)
+                stats[-1]['epoch'] = -1
+            
+            cur_steps = train_epoch(model, optimizer, scheduler, train_dataloader, epoch, num_epochs, cur_steps, mode)
+
             embeddings, _, labels, labels_original = validate_epoch(model, val_train_dataloader, mode)
             contr_stats = contrastive_evaluate(embeddings=embeddings, 
                                                labels=labels,
                                                labels_original=labels_original,
-                                               rel2id_original=rel2id_original,
                                                id2rel_original=id2rel_original,
-                                               plot_save_path=os.path.join(plots_dir, f'epoch_{epoch}.png'))
+                                               plot_save_path=os.path.join(plots_dir, f'contr_epoch-{epoch}.png'))
+            print(f"-- VALIDATION RESULTS (EPOCH {epoch+1}) --")
             print_dict(contr_stats)
             stats.append(contr_stats)
 
             if contr_stats['holdout_cand_ratio'] > best_stat: # If achieve higher holdout_cand_ratio, save model
-                torch.save(model.state_dict(), os.path.join(checkpoint_dir, f'best_checkpoint.pt'))
+                for f in os.listdir(checkpoint_dir): # empty the checkpoint directory
+                    os.remove(os.path.join(checkpoint_dir, f))
+                torch.save(model.state_dict(), os.path.join(checkpoint_dir, f'best-checkpoint_epoch-{epoch}.pt'))
                 best_stat = contr_stats['holdout_cand_ratio']
 
         stats[-1]['epoch'] = epoch

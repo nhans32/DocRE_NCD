@@ -3,3 +3,4 @@ hf_cache/
 venv/
 __pycache__/
 models/*.pt
+out/**/checkpoints/

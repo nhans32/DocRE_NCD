@@ -15,6 +15,9 @@ def contrastive_evaluate(embeddings,
     pos_embeddings = embeddings[pos_mask]
     neg_embeddings = torch.cat([embeddings[neg_mask], embeddings[holdout_mask]], dim=0) # Negatives for evaluation purposes are both negatives and holdouts
 
+    pos_variance = pos_embeddings.var(dim=0).mean().item()
+    neg_variance = neg_embeddings.var(dim=0).mean().item()
+
     pos_center = pos_embeddings.mean(dim=0)
     neg_center = neg_embeddings.mean(dim=0)
 
@@ -42,6 +45,8 @@ def contrastive_evaluate(embeddings,
             per_class_retain[label_name] = (cand_count, count, cand_count/count) # May overwrite but that's fine
 
     stats = {
+        'pos_variance': pos_variance,
+        'neg_variance': neg_variance,
         'pos_neg_sim': pos_neg_sim,
         'holdout_cand_ratio': holdout_cand_ratio, # Ratio of holdouts that are candidates
         'holdout_cand_count': holdout_cand_mask.sum().item(),

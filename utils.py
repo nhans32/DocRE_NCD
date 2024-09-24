@@ -143,36 +143,52 @@ def get_holdouts(train_samples,
                  min_dev_indiv=50):
     
     train_indiv_labels = []
+    train_labels = []
     for doc in train_samples:
         for label in doc['labels']:
             label_sum = sum(label)
             if label_sum == 1 and label[0] != 1: # not NA and not coocurence
                 train_indiv_labels.append(label)
+            train_labels.append(label)
     train_indiv_labels = np.array(train_indiv_labels)
+    train_labels = np.array(train_labels)
 
     dev_indiv_labels = []
+    dev_labels = []
     for doc in dev_samples:
         for label in doc['labels']:
             label_sum = sum(label)
             if label_sum == 1 and label[0] != 1: # not NA and not coocurence
                 dev_indiv_labels.append(label)
+            dev_labels.append(label)
     dev_indiv_labels = np.array(dev_indiv_labels)
+    dev_labels = np.array(dev_labels)
 
-    holdout_candidate_ids = np.intersect1d(np.where(train_indiv_labels.sum(axis=0) >= min_train_indiv)[0], 
-                                           np.where(dev_indiv_labels.sum(axis=0) >= min_dev_indiv)[0]) 
+    train_cts = train_labels.sum(axis=0)
+    dev_cts = dev_labels.sum(axis=0)
+    train_indiv_cts = train_indiv_labels.sum(axis=0)
+    dev_indiv_cts = dev_indiv_labels.sum(axis=0)
+
+
+    holdout_candidate_ids = np.intersect1d(np.where(train_indiv_cts >= min_train_indiv)[0], 
+                                           np.where(dev_indiv_cts >= min_dev_indiv)[0]) 
     holdout_candidate_rels = [id2rel[i] for i in holdout_candidate_ids]
 
-    holdout_rels = np.random.choice(holdout_candidate_rels, 30, replace=False).tolist()
-    holdout_rel_batches = [holdout_rels[i:i+6] for i in range(0, 30, 6)]
-    holdout_id_batches = [[rel2id[r] for r in rel_batch] for rel_batch in holdout_rel_batches]
+    holdout_rels = np.random.choice(holdout_candidate_rels, 24, replace=False).tolist() # We want 4 batches of 6 holdout relationships
+    holdout_rel_batches = [holdout_rels[i:i+6] for i in range(0, 24, 6)]
 
     with open(os.path.join('out', 'holdout_info.json'), 'w') as f: # Dump holdout relationship information
         json.dump({
-            'holdout_rel_batches': holdout_rel_batches,
-            'holdout_id_batches': holdout_id_batches,
+            'holdout_rel_batches': [{rel: {
+                'id': rel2id[rel],
+                'train_ct': int(train_cts[rel2id[rel]]),
+                'train_indiv_ct': int(train_indiv_cts[rel2id[rel]]),
+                'dev_ct': int(dev_cts[rel2id[rel]]),
+                'dev_indiv_ct': int(dev_indiv_cts[rel2id[rel]])
+            } for rel in batch} for batch in holdout_rel_batches]
         }, f, indent=2)
 
-    return holdout_rel_batches, holdout_id_batches
+    return holdout_rel_batches
 
 
 

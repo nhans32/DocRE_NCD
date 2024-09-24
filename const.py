@@ -15,3 +15,5 @@ MAX_DOC_LENGTH = 1024 # Max length a document overall (in tokens)
 
 MAX_GRAD_NORM = 1.0 # Max gradient norm for clipping
 WARMUP_RATIO = 0.06
+
+MAX_BATCH_PAIRS = 2450 # Max number of pairs in a batch. To prevent memory issues

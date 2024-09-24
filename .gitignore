@@ -4,3 +4,4 @@ venv/
 __pycache__/
 models/*.pt
 out/**/checkpoints/
+out/

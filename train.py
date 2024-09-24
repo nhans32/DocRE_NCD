@@ -13,11 +13,12 @@ import json
 
 def load_optim_sched(model,
                      train_dataloader,
-                     num_epochs):
+                     num_epochs,
+                     encoder_lr=3e-5):
     # -- OPTIMIZER --
     encoder_params = ['luke_model'] # Want to set lr on base model to 3e-5, and rest of model to 1e-4 with eps 1e-6
     optimizer = torch.optim.AdamW([
-        {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in encoder_params)], 'lr': 3e-5},
+        {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in encoder_params)], 'lr': encoder_lr}, # NOTE: modify learning rate for this
         {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in encoder_params)]}
     ], lr=1e-4, eps=1e-6)
 
@@ -41,11 +42,20 @@ def train_epoch(model,
     running_sup_loss, running_contr_loss = 0.0, 0.0
     batch_i = 0
 
+    max_num_pairs = 0
+    num_batch_skipped = 0
+
     model.zero_grad()
     model.train()
     with tqdm(train_dataloader, unit='batch') as tepoch:
         for batch in tepoch:
-            tepoch.set_description(f'Train Epoch {cur_epoch+1}/{num_epochs}')
+            num_pairs = sum([len(p) for p in batch['hts']]) # Number of pairs in batch
+            if mode == const.MODE_CONTRASTIVE and num_pairs > const.MAX_BATCH_PAIRS:
+                num_batch_skipped += 1
+                continue
+
+            tepoch.set_description(f'Train Epoch {cur_epoch+1}/{num_epochs} | Num. Pair Batch: {num_pairs}')
+
             batch = batch_to_device(batch, const.DEVICE)
 
             model.zero_grad()
@@ -64,7 +74,10 @@ def train_epoch(model,
             cur_steps += 1
             batch_i += 1
 
-            tepoch.set_postfix(sup_loss=running_sup_loss / batch_i, contr_loss=running_contr_loss / batch_i)
+            if num_pairs > max_num_pairs:
+                max_num_pairs = num_pairs
+            tepoch.set_postfix(num_batch_skipped=num_batch_skipped, max_num_pairs=max_num_pairs, sup_loss=running_sup_loss / batch_i, contr_loss=running_contr_loss / batch_i)
+
     return cur_steps
 
 
@@ -136,7 +149,7 @@ def train(model,
     stats = []
     best_stat = -1
     for epoch in range(num_epochs):
-        # -- SUPERVISED VALIDATION --
+        # -- SUPERVISED TRAINING --
         if mode == const.MODE_SUPERVISED:
             cur_steps = train_epoch(model, optimizer, scheduler, train_dataloader, epoch, num_epochs, cur_steps, mode)
 
@@ -146,8 +159,6 @@ def train(model,
                                                id2rel=id2rel_holdout)
             if len(official_predictions) > 0:
                 official_stats = official_evaluate(official_predictions, const.DATA_DIR)
-                print(f"-- VALIDATION RESULTS (EPOCH {epoch+1}) --")
-                print_dict(official_stats)
                 stats.append(official_stats)
 
                 if official_stats['f1_ign'] > best_stat: # If achieve higher F1 score, save model
@@ -159,7 +170,7 @@ def train(model,
                 print(f"No predictions made...")
                 stats.append(None)
 
-        # -- CONTRASTIVE VALIDATION --
+        # -- CONTRASTIVE TRAINING --
         elif mode == const.MODE_CONTRASTIVE: # We don't care about performance on dev set for contrastive learning, we just want the embeddings for the training set
             if epoch == 0: # Just to see how the model performs on the training set before training
                 embeddings, _, labels, labels_original = validate_epoch(model, val_train_dataloader, mode)
@@ -168,8 +179,6 @@ def train(model,
                                                    labels_original=labels_original,
                                                    id2rel_original=id2rel_original,
                                                    plot_save_path=os.path.join(plots_dir, f'contr_epoch-pre.png'))
-                print(f"-- VALIDATION RESULTS (PRELIMINARY) --")
-                print_dict(contr_stats)
                 stats.append(contr_stats)
                 stats[-1]['epoch'] = -1
             
@@ -181,8 +190,6 @@ def train(model,
                                                labels_original=labels_original,
                                                id2rel_original=id2rel_original,
                                                plot_save_path=os.path.join(plots_dir, f'contr_epoch-{epoch}.png'))
-            print(f"-- VALIDATION RESULTS (EPOCH {epoch+1}) --")
-            print_dict(contr_stats)
             stats.append(contr_stats)
 
             if contr_stats['holdout_cand_ratio'] > best_stat: # If achieve higher holdout_cand_ratio, save model

@@ -5,99 +5,8 @@ from transformers import LukeModel
 import torch.nn.functional as F
 import json
 import const
-from losses import ATLoss
+from losses import ATLoss, SupConLoss
 from encoding import encode
-
-class SupConLoss(torch.nn.Module): # From: https://github.com/sgvaze/generalized-category-discovery/blob/main/methods/contrastive_training/contrastive_training.py
-    """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
-    It also supports the unsupervised contrastive loss in SimCLR
-    From: https://github.com/HobbitLong/SupContrast"""
-    def __init__(self, temperature=0.07, contrast_mode='all',
-                 base_temperature=0.07):
-        super(SupConLoss, self).__init__()
-        self.temperature = temperature
-        self.contrast_mode = contrast_mode
-        self.base_temperature = base_temperature
-
-    def forward(self, features, labels=None, mask=None):
-        """Compute loss for model. If both `labels` and `mask` are None,
-        it degenerates to SimCLR unsupervised loss:
-        https://arxiv.org/pdf/2002.05709.pdf
-        Args:
-            features: hidden vector of shape [bsz, n_views, ...].
-            labels: ground truth of shape [bsz].
-            mask: contrastive mask of shape [bsz, bsz], mask_{i,j}=1 if sample j
-                has the same class as sample i. Can be asymmetric.
-        Returns:
-            A loss scalar.
-        """
-
-        device = (torch.device(const.DEVICE)
-                  if features.is_cuda
-                  else torch.device('cpu'))
-
-        if len(features.shape) < 3:
-            raise ValueError('`features` needs to be [bsz, n_views, ...],'
-                             'at least 3 dimensions are required')
-        if len(features.shape) > 3:
-            features = features.view(features.shape[0], features.shape[1], -1)
-
-        batch_size = features.shape[0]
-        if labels is not None and mask is not None:
-            raise ValueError('Cannot define both `labels` and `mask`')
-        elif labels is None and mask is None:
-            mask = torch.eye(batch_size, dtype=torch.float32).to(device)
-        elif labels is not None:
-            labels = labels.contiguous().view(-1, 1)
-            if labels.shape[0] != batch_size:
-                raise ValueError('Num of labels does not match num of features')
-            mask = torch.eq(labels, labels.T).float().to(device)
-        else:
-            mask = mask.float().to(device)
-
-        contrast_count = features.shape[1]
-        contrast_feature = torch.cat(torch.unbind(features, dim=1), dim=0)
-        if self.contrast_mode == 'one':
-            anchor_feature = features[:, 0]
-            anchor_count = 1
-        elif self.contrast_mode == 'all':
-            anchor_feature = contrast_feature
-            anchor_count = contrast_count
-        else:
-            raise ValueError('Unknown mode: {}'.format(self.contrast_mode))
-
-        # compute logits
-        anchor_dot_contrast = torch.div(
-            torch.matmul(anchor_feature, contrast_feature.T),
-            self.temperature)
-
-        # for numerical stability
-        logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
-        logits = anchor_dot_contrast - logits_max.detach()
-
-        # tile mask
-        mask = mask.repeat(anchor_count, contrast_count)
-        # mask-out self-contrast cases
-        logits_mask = torch.scatter(
-            torch.ones_like(mask),
-            1,
-            torch.arange(batch_size * anchor_count).view(-1, 1).to(device),
-            0
-        )
-        mask = mask * logits_mask
-
-        # compute log_prob
-        exp_logits = torch.exp(logits) * logits_mask
-        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True))
-
-        # compute mean of log-likelihood over positive
-        mean_log_prob_pos = (mask * log_prob).sum(1) / mask.sum(1)
-
-        # loss
-        loss = - (self.temperature / self.base_temperature) * mean_log_prob_pos
-        loss = loss.view(anchor_count, batch_size).mean()
-
-        return loss
 
 
 class DocRedModel(nn.Module):
@@ -105,7 +14,10 @@ class DocRedModel(nn.Module):
                  model_name,
                  tokenizer,
                  num_class,
-                 contrastive_tmp,
+                 mode,
+                 contr_temp=None, # hyperparameter
+                 contr_sup_weight=None, # hyperparameter
+                 dual_binlog_weight=None, # hyperparameter
                  embed_size=768, # Intermediary embedding for head and tail entities
                  out_embed_size=768, # Final embedding for the relationship
                  projection_size=128,
@@ -115,6 +27,16 @@ class DocRedModel(nn.Module):
 
         if model_name not in set([const.LUKE_BASE, const.LUKE_LARGE, const.LUKE_LARGE_TACRED]):
             raise ValueError(f'Invalid encoder name: {model_name}')
+        
+        if mode not in set([const.MODE_OFFICIAL, const.MODE_CONTRASTIVE, const.MODE_DUAL_SUPERVISED]):
+            raise ValueError(f'Invalid mode: {mode}')
+        
+        if mode == const.MODE_CONTRASTIVE and not all([contr_temp, contr_sup_weight]):
+            raise ValueError('Contrastive mode requires contrastive temperature and contrastive supervised weight')
+        
+        if mode == const.MODE_DUAL_SUPERVISED and not dual_binlog_weight:
+            raise ValueError('Dual supervised mode requires dual binary logit weight')
+        
         self.model_name = model_name
 
         self.start_tok_ids = [tokenizer.cls_token_id] # list of token ids that indicate the start of an input sequence
@@ -126,11 +48,15 @@ class DocRedModel(nn.Module):
         self.out_embed_size = out_embed_size
         self.projection_size = projection_size
 
-        self.atloss_fn = ATLoss()
-        self.posclassloss_fn = nn.BCEWithLogitsLoss()
-        self.contrloss_fn = SupConLoss(temperature=contrastive_tmp)
+        self.mode = mode
 
-        self.contrastive_tmp = contrastive_tmp
+        self.contr_temp = contr_temp
+        self.contr_sup_weight = contr_sup_weight
+        self.dual_binlog_weight = dual_binlog_weight
+
+        self.atloss_fn = ATLoss()
+        self.binlogloss_fn = nn.BCEWithLogitsLoss()
+        self.contrloss_fn = SupConLoss(temperature=self.contr_temp)
 
         self.max_labels = max_labels
         self.num_class = num_class
@@ -138,9 +64,11 @@ class DocRedModel(nn.Module):
         self.luke_model = LukeModel.from_pretrained(self.model_name) # Base model
         self.head_extractor = nn.Linear(2 * self.hidden_size, self.embed_size)
         self.tail_extractor = nn.Linear(2 * self.hidden_size, self.embed_size)
-        self.bilinear = nn.Linear(self.embed_size * self.block_size, self.out_embed_size)
+        self.bilinear = nn.Linear(self.embed_size * self.block_size, self.out_embed_size if mode != const.MODE_OFFICIAL else self.num_class) # This is to maintain original ATLOP implementation
 
         self.classifier_head = nn.Linear(self.out_embed_size, self.num_class)
+
+        self.binary_head = nn.Linear(self.out_embed_size, 1)
 
         self.projection_head = nn.Linear(self.out_embed_size, self.projection_size)
 
@@ -208,7 +136,7 @@ class DocRedModel(nn.Module):
         return hss, tss, rel_seq_embeds
         
 
-    def embed(self, batch, mode):
+    def embed(self, batch):
         seq_lhs, ent_lhs, ent_to_seq_attn, ent_to_ent_attn, entity_id_labels = encode(model=self.luke_model,
                                                                                       batch=batch,
                                                                                       start_tok_ids=self.start_tok_ids,
@@ -234,77 +162,100 @@ class DocRedModel(nn.Module):
         b2 = ts.view(-1, self.embed_size // self.block_size, self.block_size)
         bl = (b1.unsqueeze(3) * b2.unsqueeze(2)).view(-1, self.embed_size * self.block_size)
 
-        embeds = self.bilinear(bl)
+        embeds = self.bilinear(bl) # returns out_embed_size or num_class based on mode
 
-        class_logits, proj_logits = None, None
+        class_logits, binary_logits, proj_logits = None, None, None
 
-        if mode == const.MODE_SUPERVISED:
-            class_logits = self.classifier_head(embeds) # Classification head for supervised learning
+        if self.mode == const.MODE_OFFICIAL:
+            class_logits = embeds # Classification head for official supervised learning -> bilinear has class logits output in official mode
+            embeds = None
 
-        if mode == const.MODE_CONTRASTIVE:
-            proj_logits = torch.tanh(self.projection_head(embeds)) # Projection head for SimCSE
+        elif self.mode == const.MODE_CONTRASTIVE:
+            # https://github.com/hppRC/simple-simcse/blob/main/train.py#L149 -> SimCSE has tanh activation function for projection head
+            # Supervised contrastive normalizes input to projection head but SimCLR does not
+            proj_logits = torch.tanh(self.projection_head(F.normalize(embeds, dim=-1))) # normalizing before projection input seems to be good
+        
+        elif self.mode == const.MODE_DUAL_SUPERVISED:
+            class_logits = self.classifier_head(embeds)
+            binary_logits = self.binary_head(embeds)
+        
+        return embeds, class_logits, binary_logits, proj_logits
 
-        return embeds, class_logits, proj_logits
-    
+        
+
 
     def forward(self,
                 batch,
-                mode,
                 train):
-        
-        if mode not in set([const.MODE_SUPERVISED, const.MODE_CONTRASTIVE]):
-            raise ValueError(f'Invalid mode: {mode}')
-
         labels = [torch.tensor(l) for l in batch['labels']]
         labels = torch.cat(labels, dim=0).float()
 
         embeds, preds = None, None
-        update_loss, sup_loss, contr_loss = None, None, None    
+        update_loss, sup_loss, contr_loss, sup_contr_loss, unsup_contr_loss = None, None, None, None, None 
 
         if train: # Training
-            if mode == const.MODE_CONTRASTIVE:
-                embeds, _, proj_logits1 = self.embed(batch, mode)
-                _, _, proj_logits2 = self.embed(batch, mode) # Forward pass 2 - Done for ensuring different dropout masks are applied (sufficient augmentation)
+            if self.mode == const.MODE_CONTRASTIVE:
+                embeds, _, _, proj_logits1 = self.embed(batch)
+                _, _, _, proj_logits2 = self.embed(batch) # Forward pass 2 - Done for ensuring different dropout masks are applied (sufficient augmentation)
 
                 proj_logits = torch.stack([proj_logits1, proj_logits2], dim=1) # [batch_size, 2, projection_size]
-                contr_labels = (labels[:, 0] == 1).long() # Positive pairs have the same label, negative pairs have same label
-                contr_loss = self.contrloss_fn(features=proj_logits, labels=contr_labels)
-                
-                # Old simple SimCLR
-                # sim_matrix = F.cosine_similarity(proj_logits1.unsqueeze(1), proj_logits2.unsqueeze(0), dim=-1) # Calculate cosine similarity between all pairs of embeddings
-                # sim_matrix = sim_matrix / self.contrastive_tmp
-                # contr_labels = torch.arange(sim_matrix.size(0)).long().to(const.DEVICE)
+                proj_logits = F.normalize(proj_logits, dim=-1) # Have to normalize per https://github.com/HobbitLong/SupContrast/issues/22 for SupConLoss. Look at various questions/issues on 'normalization and nan loss'
 
-                # contr_loss = self.contrloss_fn(sim_matrix, contr_labels)
+                contr_labels = (labels[:, 0] == 1).long()
+
+                sup_contr_loss = self.contrloss_fn(features=proj_logits, labels=contr_labels)
+                unsup_contr_loss = self.contrloss_fn(features=proj_logits)
+
+                contr_loss = (self.contr_sup_weight * sup_contr_loss) + ((1 - self.contr_sup_weight) * unsup_contr_loss) # previous plotting was done with 0.45/0.55
 
                 update_loss = contr_loss
 
-            elif mode == const.MODE_SUPERVISED: 
-                embeds, class_logits, _ = self.embed(batch, mode)
+            elif self.mode == const.MODE_OFFICIAL: 
+                _, class_logits, _, _ = self.embed(batch)
 
                 sup_loss = self.atloss_fn(class_logits.float(), labels.float().to(const.DEVICE))
                 
                 update_loss = sup_loss
 
+            elif self.mode == const.MODE_DUAL_SUPERVISED:
+                embeds, class_logits, binary_logits, _ = self.embed(batch)
+
+                binlog_labels = (labels[:, 0] == 1).float()
+
+                sup_loss = self.atloss_fn(class_logits.float(), labels.float().to(const.DEVICE))
+                binlog_loss = self.binlogloss_fn(binary_logits.flatten().float(), binlog_labels.float().to(const.DEVICE)) # NOTE: double check this
+
+                dual_loss = (self.dual_binlog_weight * binlog_loss) + ((1 - self.dual_binlog_weight) * sup_loss)
+
+                update_loss = dual_loss
+
             if update_loss is None:
                 raise ValueError('Loss to update is None')
             
         else: # Validation
-            if mode == const.MODE_SUPERVISED:
-                embeds, class_logits, _ = self.embed(batch, mode)
+            if self.mode == const.MODE_OFFICIAL:
+                _, class_logits, _, _ = self.embed(batch)
                 preds = self.atloss_fn.get_label(class_logits.float(), num_labels=self.max_labels)
+                embeds = torch.zeros(class_logits.size(0), self.out_embed_size).to(const.DEVICE) # No embeddings for official mode
 
-            elif mode == const.MODE_CONTRASTIVE:
-                embeds, _, _ = self.embed(batch, mode)
+            elif self.mode == const.MODE_CONTRASTIVE:
+                embeds, _, _, _ = self.embed(batch)
                 preds = torch.zeros(embeds.size(0), self.num_class).to(const.DEVICE) # No predictions for contrastive mode
 
-            if preds is None:
-                raise ValueError('Predictions are None')
+            elif self.mode == const.MODE_DUAL_SUPERVISED:
+                embeds, class_logits, binary_logits, _ = self.embed(batch)
+                preds = self.atloss_fn.get_label(class_logits.float(), num_labels=self.max_labels)
+                # TODO: add binary logits to predictions
+
+            if preds is None or embeds is None:
+                raise ValueError('Prediction or embeddings are None')
 
         losses = {
             'update_loss': update_loss if update_loss else torch.tensor(-1).to(const.DEVICE), # Dynamically update loss based on mode
             'sup_loss': sup_loss if sup_loss else torch.tensor(-1).to(const.DEVICE),
-            'contr_loss': contr_loss if contr_loss else torch.tensor(-1).to(const.DEVICE)
+            'contr_loss': contr_loss if contr_loss else torch.tensor(-1).to(const.DEVICE),
+            'sup_contr_loss': sup_contr_loss if sup_contr_loss else torch.tensor(-1).to(const.DEVICE),
+            'unsup_contr_loss': unsup_contr_loss if unsup_contr_loss else torch.tensor(-1).to(const.DEVICE)
         }
 
         return embeds, preds, losses

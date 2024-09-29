@@ -6,6 +6,12 @@ import json
 import torch
 
 
+def detailed_supervised_evaluate(predictions,
+                                 labels,
+                                 labels_original):
+    pass
+
+
 def to_official(preds, 
                 samples,
                 id2rel):

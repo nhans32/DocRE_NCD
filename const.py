@@ -2,8 +2,11 @@ LUKE_BASE = 'studio-ousia/luke-base'
 LUKE_LARGE = 'studio-ousia/luke-large'
 LUKE_LARGE_TACRED = 'studio-ousia/luke-large-finetuned-tacred'
 
+LRS = {LUKE_BASE: 5e-5, LUKE_LARGE: 3e-5, LUKE_LARGE_TACRED: 3e-5}
+
 MODE_CONTRASTIVE = 'contrastive'
-MODE_SUPERVISED = 'supervised'
+MODE_OFFICIAL = 'official'
+MODE_DUAL_SUPERVISED = 'dual'
 
 DEVICE = 'cuda:1'
 DATA_DIR = '/data2/nhanse02/thesis/data'
@@ -15,5 +18,4 @@ MAX_DOC_LENGTH = 1024 # Max length a document overall (in tokens)
 
 MAX_GRAD_NORM = 1.0 # Max gradient norm for clipping
 WARMUP_RATIO = 0.06
-
-MAX_BATCH_PAIRS = 2450 # Max number of pairs in a batch. To prevent memory issues
+GRADIENT_ACCUMULATION_STEPS = 1

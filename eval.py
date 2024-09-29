@@ -10,35 +10,50 @@ def dim_reduce(embeddings,
 
 
 
-def get_masks(labels, original_labels):
+def get_masks(labels, labels_original):
     pos_mask = labels[:, 0] == 0
-    original_pos_mask = original_labels[:, 0] == 0
+    original_pos_mask = labels_original[:, 0] == 0
     holdout_mask = torch.logical_xor(pos_mask, original_pos_mask)
     neg_mask = torch.logical_and(~pos_mask, ~holdout_mask)
 
     return pos_mask, holdout_mask, neg_mask
 
 
+
 # Function to reduce the amount needed for plotting. 
-# Reduces the amount of positives and holdouts for plotting based upon the number of negatives we show
+# all_pos will retain all positives and holdouts but will fill the rest with negatives up to num total samples
 def get_subset_masks(pos_mask, 
                      holdout_mask, 
                      neg_mask, 
-                     num_neg=100000): 
-    
-    scale_factor = num_neg/neg_mask.sum().item()
+                     num=75000,
+                     mode='scale'): # Mode can be 'scale' or 'all_pos'
+    if mode == 'scale':
+        subset_pos_mask = torch.zeros(pos_mask.size(0)).bool()
+        subset_holdout_mask = torch.zeros(holdout_mask.size(0)).bool()
+        subset_neg_mask = torch.zeros(neg_mask.size(0)).bool()
 
-    pos_remove_ct = int(pos_mask.sum().item() - int(pos_mask.sum().item() * scale_factor))
-    holdout_remove_ct = int(holdout_mask.sum().item() - int(holdout_mask.sum().item() * scale_factor))
-    neg_remove_ct = int(neg_mask.sum().item() - int(neg_mask.sum().item() * scale_factor))
-    
-    pos_mask_nonzeros = pos_mask.nonzero().flatten()
-    holdout_mask_nonzeros = holdout_mask.nonzero().flatten()
-    neg_mask_nonzeros = neg_mask.nonzero().flatten()
+        scale_factor = num/(pos_mask.sum().item() + holdout_mask.sum().item() + neg_mask.sum().item())
 
-    # Reduce number of trues in each mask based upon scale factor. Want total number of trues after scaling to be equal to num_trues * scale_factor
-    pos_mask[pos_mask_nonzeros[torch.randperm(pos_mask_nonzeros.size(0))[:pos_remove_ct]]] = False
-    holdout_mask[holdout_mask_nonzeros[torch.randperm(holdout_mask_nonzeros.size(0))[:holdout_remove_ct]]] = False
-    neg_mask[neg_mask_nonzeros[torch.randperm(neg_mask_nonzeros.size(0))[:neg_remove_ct]]] = False
+        pos_mask_nonzeros = pos_mask.nonzero().flatten()
+        holdout_mask_nonzeros = holdout_mask.nonzero().flatten()
+        neg_mask_nonzeros = neg_mask.nonzero().flatten()
 
-    return pos_mask, holdout_mask, neg_mask
+        num_pos = int(pos_mask.sum().item() * scale_factor)
+        num_holdout = int(holdout_mask.sum().item() * scale_factor)
+        num_neg = int(neg_mask.sum().item() * scale_factor)
+
+        subset_pos_mask[pos_mask_nonzeros[torch.randperm(pos_mask_nonzeros.size(0))[:num_pos]]] = True
+        subset_holdout_mask[holdout_mask_nonzeros[torch.randperm(holdout_mask_nonzeros.size(0))[:num_holdout]]] = True
+        subset_neg_mask[neg_mask_nonzeros[torch.randperm(neg_mask_nonzeros.size(0))[:num_neg]]] = True
+
+    elif mode == 'all_pos':
+        subset_pos_mask = pos_mask
+        subset_holdout_mask = holdout_mask
+        subset_neg_mask = torch.zeros(neg_mask.size(0)).bool()
+
+        num_negs = num - pos_mask.sum().item() - holdout_mask.sum().item()
+        if num_negs > 0:
+            neg_mask_nonzeros = neg_mask.nonzero().flatten()
+            subset_neg_mask[neg_mask_nonzeros[torch.randperm(neg_mask_nonzeros.size(0))[:num_negs]]] = True
+
+    return subset_pos_mask, subset_holdout_mask, subset_neg_mask

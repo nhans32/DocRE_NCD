@@ -3,7 +3,7 @@ import transformers
 import const
 from utils import batch_to_device
 from tqdm import tqdm
-from eval_official import to_official, official_evaluate
+from eval_official import to_official, official_evaluate, detailed_supervised_evaluate
 from torch.utils.data import DataLoader
 from utils import collate_fn
 import os
@@ -14,13 +14,14 @@ import json
 def load_optim_sched(model,
                      train_dataloader,
                      num_epochs,
-                     encoder_lr=3e-5):
+                     encoder_lr=3e-5,
+                     other_lr=1e-4):
     # -- OPTIMIZER --
     encoder_params = ['luke_model'] # Want to set lr on base model to 3e-5, and rest of model to 1e-4 with eps 1e-6
     optimizer = torch.optim.AdamW([
         {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in encoder_params)], 'lr': encoder_lr}, # NOTE: modify learning rate for this
         {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in encoder_params)]}
-    ], lr=1e-4, eps=1e-6)
+    ], lr=other_lr, eps=1e-6)
 
     # -- SCHEDULER --
     total_steps = int(len(train_dataloader) * num_epochs)
@@ -37,30 +38,27 @@ def train_epoch(model,
                 train_dataloader,
                 cur_epoch,
                 num_epochs,
-                cur_steps,
-                mode):
-    running_sup_loss, running_contr_loss = 0.0, 0.0
+                cur_steps):
+    
+    running_losses = {
+        'sup_loss': 0.0,
+        'contr_loss': 0.0,
+        'sup_contr_loss': 0.0,
+        'unsup_contr_loss': 0.0
+    }
     batch_i = 0
-
-    max_num_pairs = 0
-    num_batch_skipped = 0
 
     model.zero_grad()
     model.train()
     with tqdm(train_dataloader, unit='batch') as tepoch:
         for batch in tepoch:
-            num_pairs = sum([len(p) for p in batch['hts']]) # Number of pairs in batch
-            if mode == const.MODE_CONTRASTIVE and num_pairs > const.MAX_BATCH_PAIRS:
-                num_batch_skipped += 1
-                continue
-
-            tepoch.set_description(f'Train Epoch {cur_epoch+1}/{num_epochs} | Num. Pair Batch: {num_pairs}')
+            tepoch.set_description(f'Train Epoch {cur_epoch+1}/{num_epochs}')
 
             batch = batch_to_device(batch, const.DEVICE)
 
             model.zero_grad()
 
-            _, _, losses = model(batch=batch, mode=mode, train=True)
+            _, _, losses = model(batch=batch, train=True)
 
             losses['update_loss'].backward()
 
@@ -68,23 +66,21 @@ def train_epoch(model,
             optimizer.step()
             scheduler.step()
 
-            running_sup_loss += losses['sup_loss'].item()
-            running_contr_loss += losses['contr_loss'].item()
-
             cur_steps += 1
             batch_i += 1
 
-            if num_pairs > max_num_pairs:
-                max_num_pairs = num_pairs
-            tepoch.set_postfix(num_batch_skipped=num_batch_skipped, max_num_pairs=max_num_pairs, sup_loss=running_sup_loss / batch_i, contr_loss=running_contr_loss / batch_i)
+            for l in running_losses.keys():
+                running_losses[l] += losses[l].item()
 
-    return cur_steps
+            display_losses = {k: v/batch_i for k, v in running_losses.items()}
+            tepoch.set_postfix(display_losses)
+
+    return cur_steps, display_losses
 
 
 
 def validate_epoch(model,
-                   dataloader,
-                   mode):
+                   dataloader):
     embeddings, predictions, labels, labels_original = [], [], [], []
 
     model.eval()
@@ -94,7 +90,7 @@ def validate_epoch(model,
             batch = batch_to_device(batch, const.DEVICE)
 
             with torch.no_grad():
-                embeds, preds, _ = model(batch=batch, mode=mode, train=False)
+                embeds, preds, _ = model(batch=batch, train=False)
 
                 preds = preds.cpu()
                 embeds = embeds.cpu()
@@ -119,21 +115,18 @@ def validate_epoch(model,
 def train(model,
           train_dataloader,
           dev_dataloader,
-          train_samples,
+          val_train_dataloader, # dataloader with training samples but not shuffled
           dev_samples,
           id2rel_holdout,
           id2rel_original,
           num_epochs,
-          mode,
+          encoder_lr,
           out_dir):
     
-    optimizer, scheduler = load_optim_sched(model, train_dataloader, num_epochs)
-
-    val_train_dataloader = DataLoader(train_samples, 
-                                      batch_size=dev_dataloader.batch_size,
-                                      shuffle=isinstance(dev_dataloader.sampler, torch.utils.data.sampler.RandomSampler), # If sampler is RandomSampler, shuffle=True, else False
-                                      collate_fn=collate_fn, 
-                                      drop_last=dev_dataloader.drop_last) # (Only used in contrastive) Need new dataloader to validate over training data, i.e. drop_last=False. Want the Dataloader attributes of dev_dataloader just applied to train_samples
+    optimizer, scheduler = load_optim_sched(model, 
+                                            train_dataloader, 
+                                            num_epochs,
+                                            encoder_lr=encoder_lr)
 
     # Create directory stuctures if it doesn't already exist
     checkpoint_dir = os.path.join(out_dir, 'checkpoints')
@@ -149,17 +142,20 @@ def train(model,
     stats = []
     best_stat = -1
     for epoch in range(num_epochs):
-        # -- SUPERVISED TRAINING --
-        if mode == const.MODE_SUPERVISED:
-            cur_steps = train_epoch(model, optimizer, scheduler, train_dataloader, epoch, num_epochs, cur_steps, mode)
+        if model.mode == const.MODE_OFFICIAL:
+            cur_steps, display_losses = train_epoch(model, optimizer, scheduler, train_dataloader, epoch, num_epochs, cur_steps)
 
-            _, predictions, _, _ = validate_epoch(model, dev_dataloader, mode)
-            official_predictions = to_official(preds=predictions,
+            _, predictions, labels, labels_original = validate_epoch(model, dev_dataloader)
+
+            detailed_sup_stats = detailed_supervised_evaluate(predictions=predictions,
+                                                              labels=labels,
+                                                              labels_original=labels_original)
+
+            official_predictions = to_official(preds=predictions, # This is the original DocRED
                                                samples=dev_samples,
                                                id2rel=id2rel_holdout)
             if len(official_predictions) > 0:
                 official_stats = official_evaluate(official_predictions, const.DATA_DIR)
-                stats.append(official_stats)
 
                 if official_stats['f1_ign'] > best_stat: # If achieve higher F1 score, save model
                     for f in os.listdir(checkpoint_dir): # empty the checkpoint directory
@@ -168,28 +164,22 @@ def train(model,
                     best_stat = official_stats['f1_ign']
             else:
                 print(f"No predictions made...")
-                stats.append(None)
-
-        # -- CONTRASTIVE TRAINING --
-        elif mode == const.MODE_CONTRASTIVE: # We don't care about performance on dev set for contrastive learning, we just want the embeddings for the training set
-            if epoch == 0: # Just to see how the model performs on the training set before training
-                embeddings, _, labels, labels_original = validate_epoch(model, val_train_dataloader, mode)
-                contr_stats = contrastive_evaluate(embeddings=embeddings, 
-                                                   labels=labels,
-                                                   labels_original=labels_original,
-                                                   id2rel_original=id2rel_original,
-                                                   plot_save_path=os.path.join(plots_dir, f'contr_epoch-pre.png'))
-                stats.append(contr_stats)
-                stats[-1]['epoch'] = -1
+                official_stats = {'none': None}
             
-            cur_steps = train_epoch(model, optimizer, scheduler, train_dataloader, epoch, num_epochs, cur_steps, mode)
+            official_stats['losses'] = display_losses
+            stats.append(official_stats)
 
-            embeddings, _, labels, labels_original = validate_epoch(model, val_train_dataloader, mode)
+        elif model.mode == const.MODE_CONTRASTIVE: # We don't care about performance on dev set for contrastive learning, we just want the embeddings for the training set
+            # TODO: add initial validation step
+            cur_steps, display_losses = train_epoch(model, optimizer, scheduler, train_dataloader, epoch, num_epochs, cur_steps)
+
+            embeddings, _, labels, labels_original = validate_epoch(model, val_train_dataloader)
             contr_stats = contrastive_evaluate(embeddings=embeddings, 
                                                labels=labels,
                                                labels_original=labels_original,
                                                id2rel_original=id2rel_original,
                                                plot_save_path=os.path.join(plots_dir, f'contr_epoch-{epoch}.png'))
+            contr_stats['losses'] = display_losses
             stats.append(contr_stats)
 
             if contr_stats['holdout_cand_ratio'] > best_stat: # If achieve higher holdout_cand_ratio, save model

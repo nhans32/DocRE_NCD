@@ -142,6 +142,14 @@ def get_holdouts(train_samples,
                  min_train_indiv=100, # Minimum number of instances where the relationship appears individually (without coocurence with another relationship)
                  min_dev_indiv=50):
     
+    # if os.path.exists(os.path.join('out', 'holdout_info.json')):
+    if os.path.exists(os.path.join('out', 'holdout_info.json')):
+        print('Holdout info file already exists. Loading from file...')
+        with open(os.path.join('out', 'holdout_info.json'), 'r') as f:
+            holdout_info = json.load(f)
+        holdout_rel_batches = [[rel for rel in batch.keys()] for batch in holdout_info]
+        return holdout_rel_batches
+
     train_indiv_labels = []
     train_labels = []
     for doc in train_samples:
@@ -169,7 +177,6 @@ def get_holdouts(train_samples,
     train_indiv_cts = train_indiv_labels.sum(axis=0)
     dev_indiv_cts = dev_indiv_labels.sum(axis=0)
 
-
     holdout_candidate_ids = np.intersect1d(np.where(train_indiv_cts >= min_train_indiv)[0], 
                                            np.where(dev_indiv_cts >= min_dev_indiv)[0]) 
     holdout_candidate_rels = [id2rel[i] for i in holdout_candidate_ids]
@@ -178,15 +185,13 @@ def get_holdouts(train_samples,
     holdout_rel_batches = [holdout_rels[i:i+6] for i in range(0, 24, 6)]
 
     with open(os.path.join('out', 'holdout_info.json'), 'w') as f: # Dump holdout relationship information
-        json.dump({
-            'holdout_rel_batches': [{rel: {
-                'id': rel2id[rel],
-                'train_ct': int(train_cts[rel2id[rel]]),
-                'train_indiv_ct': int(train_indiv_cts[rel2id[rel]]),
-                'dev_ct': int(dev_cts[rel2id[rel]]),
-                'dev_indiv_ct': int(dev_indiv_cts[rel2id[rel]])
-            } for rel in batch} for batch in holdout_rel_batches]
-        }, f, indent=2)
+        json.dump([{rel: {
+                        'id': rel2id[rel],
+                        'train_ct': int(train_cts[rel2id[rel]]),
+                        'train_indiv_ct': int(train_indiv_cts[rel2id[rel]]),
+                        'dev_ct': int(dev_cts[rel2id[rel]]),
+                        'dev_indiv_ct': int(dev_indiv_cts[rel2id[rel]])
+        } for rel in batch} for batch in holdout_rel_batches], f, indent=2)
 
     return holdout_rel_batches
 

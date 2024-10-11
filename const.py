@@ -4,12 +4,14 @@ LUKE_LARGE_TACRED = 'studio-ousia/luke-large-finetuned-tacred'
 
 LRS = {LUKE_BASE: 5e-5, LUKE_LARGE: 3e-5, LUKE_LARGE_TACRED: 3e-5}
 
-MODE_CONTRASTIVE = 'contrastive'
+MODE_CONTRASTIVE = 'contr'
 MODE_OFFICIAL = 'official'
 MODE_DUAL_SUPERVISED = 'dual'
 
 DEVICE = 'cuda:1'
 DATA_DIR = '/data2/nhanse02/thesis/data'
+TRAIN_SAMPLES_FP = 'data/train_annotated.json'
+DEV_SAMPLES_FP = 'data/dev.json'
 
 PAD_IDS = {'input_ids': 1, 'entity_ids': 0, 'entity_position_ids': -1, 'attention_mask': 0, 'entity_attention_mask': 0}
 

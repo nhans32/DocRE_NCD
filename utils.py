@@ -6,8 +6,24 @@ from tqdm import tqdm
 import const
 import os
 
-def print_dict(d):
-    print(json.dumps(d, indent=2))
+def create_dirs(out_dir):
+    # Create directory stuctures if it doesn't already exist
+    checkpoint_dir = os.path.join(out_dir, 'checkpoints')
+    stats_dir = os.path.join(out_dir, 'stats')
+    plots_dir = os.path.join(out_dir, 'plots')
+
+    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    os.makedirs(stats_dir, exist_ok=True)
+    os.makedirs(plots_dir, exist_ok=True)
+
+    return checkpoint_dir, stats_dir, plots_dir
+
+
+
+def empty_dir(dir):
+    for f in os.listdir(dir):
+        os.remove(os.path.join(dir, f))
 
 
 
@@ -56,6 +72,8 @@ def collate_fn(batch):
         'labels_original': labels_original,
         'entity_pos': entity_pos,
         'hts': hts,
+        'train_mask': [x['train_mask'].bool() for x in batch] if 'train_mask' in batch[0] else [torch.ones(len(pairs)).bool() for pairs in hts], # This an attribute added by the dual training script, based upon the contrastive filtering candidates. 
+        # NOTE: Train mask all ones by default, but will be modified by the dual training script to only consider certain entity pairs. See model.py to see behavior with train mask
     }
 
 
@@ -135,11 +153,13 @@ def read_docred(fp, tokenizer, rel2id):
 #   - Need to have enough examples to evaluate the model on.
 # 4. Will evaluate on models ability to predict the relationship on just independent instances and co-occuring instances.
 # - Essentially, our training set will never consider these new relationships with another relationship
-def get_holdouts(train_samples,
-                 dev_samples, 
+def get_holdouts(train_samples_fp,
+                 dev_samples_fp, 
                  rel2id, 
                  id2rel,
-                 min_train_indiv=100, # Minimum number of instances where the relationship appears individually (without coocurence with another relationship)
+                 tokenizer,
+                 max_train=1500, # Maximum number of instances where the relationship appears, to avoid taking out all positives (leave us with something to train on)
+                 min_train_indiv=300, # Minimum number of instances where the relationship appears individually (without coocurence with another relationship) 
                  min_dev_indiv=50):
     
     # if os.path.exists(os.path.join('out', 'holdout_info.json')):
@@ -149,6 +169,9 @@ def get_holdouts(train_samples,
             holdout_info = json.load(f)
         holdout_rel_batches = [[rel for rel in batch.keys()] for batch in holdout_info]
         return holdout_rel_batches
+    
+    train_samples = read_docred(fp=train_samples_fp, rel2id=rel2id, tokenizer=tokenizer)
+    dev_samples = read_docred(fp=dev_samples_fp, rel2id=rel2id, tokenizer=tokenizer)
 
     train_indiv_labels = []
     train_labels = []
@@ -177,12 +200,12 @@ def get_holdouts(train_samples,
     train_indiv_cts = train_indiv_labels.sum(axis=0)
     dev_indiv_cts = dev_indiv_labels.sum(axis=0)
 
-    holdout_candidate_ids = np.intersect1d(np.where(train_indiv_cts >= min_train_indiv)[0], 
+    holdout_candidate_ids = np.intersect1d(np.intersect1d(np.where(train_indiv_cts >= min_train_indiv)[0], np.where(train_cts <= max_train)[0]),
                                            np.where(dev_indiv_cts >= min_dev_indiv)[0]) 
     holdout_candidate_rels = [id2rel[i] for i in holdout_candidate_ids]
 
-    holdout_rels = np.random.choice(holdout_candidate_rels, 24, replace=False).tolist() # We want 4 batches of 6 holdout relationships
-    holdout_rel_batches = [holdout_rels[i:i+6] for i in range(0, 24, 6)]
+    holdout_rels = np.random.choice(holdout_candidate_rels, 15, replace=False).tolist() # We want 4 batches of 6 holdout relationships
+    holdout_rel_batches = [holdout_rels[i:i+5] for i in range(0, 15, 5)]
 
     with open(os.path.join('out', 'holdout_info.json'), 'w') as f: # Dump holdout relationship information
         json.dump([{rel: {
@@ -216,7 +239,7 @@ def remove_holdouts(samples,
 
     index_switch = {v: rel2id_holdout[k] if k in rel2id_holdout else None for k, v in rel2id.items()} # index dictionary from original label indices to new label indices due to reindexing done in rel2id_holdout
     
-    for doc in samples:
+    for doc in samples: # Switching indices in labels
         new_labels = []
         for label in doc['labels']:
             new_label = [0] * len(rel2id_holdout)

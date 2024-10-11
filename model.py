@@ -17,7 +17,7 @@ class DocRedModel(nn.Module):
                  mode,
                  contr_temp=None, # hyperparameter
                  contr_sup_weight=None, # hyperparameter
-                 dual_binlog_weight=None, # hyperparameter
+                 dual_bin_weight=None, # hyperparameter
                  embed_size=768, # Intermediary embedding for head and tail entities
                  out_embed_size=768, # Final embedding for the relationship
                  projection_size=128,
@@ -34,13 +34,14 @@ class DocRedModel(nn.Module):
         if mode == const.MODE_CONTRASTIVE and not all([contr_temp, contr_sup_weight]):
             raise ValueError('Contrastive mode requires contrastive temperature and contrastive supervised weight')
         
-        if mode == const.MODE_DUAL_SUPERVISED and not dual_binlog_weight:
+        if mode == const.MODE_DUAL_SUPERVISED and not dual_bin_weight:
             raise ValueError('Dual supervised mode requires dual binary logit weight')
         
         self.model_name = model_name
+        self.tokenizer = tokenizer
 
-        self.start_tok_ids = [tokenizer.cls_token_id] # list of token ids that indicate the start of an input sequence
-        self.end_tok_ids = [tokenizer.sep_token_id] # list of token ids that indicate the end of an input sequence
+        self.start_tok_ids = [self.tokenizer.cls_token_id] # list of token ids that indicate the start of an input sequence
+        self.end_tok_ids = [self.tokenizer.sep_token_id] # list of token ids that indicate the end of an input sequence
 
         self.embed_size = embed_size
         self.block_size = block_size
@@ -52,10 +53,10 @@ class DocRedModel(nn.Module):
 
         self.contr_temp = contr_temp
         self.contr_sup_weight = contr_sup_weight
-        self.dual_binlog_weight = dual_binlog_weight
+        self.dual_bin_weight = dual_bin_weight
 
         self.atloss_fn = ATLoss()
-        self.binlogloss_fn = nn.BCEWithLogitsLoss()
+        self.binloss_fn = nn.BCEWithLogitsLoss()
         self.contrloss_fn = SupConLoss(temperature=self.contr_temp)
 
         self.max_labels = max_labels
@@ -64,13 +65,11 @@ class DocRedModel(nn.Module):
         self.luke_model = LukeModel.from_pretrained(self.model_name) # Base model
         self.head_extractor = nn.Linear(2 * self.hidden_size, self.embed_size)
         self.tail_extractor = nn.Linear(2 * self.hidden_size, self.embed_size)
-        self.bilinear = nn.Linear(self.embed_size * self.block_size, self.out_embed_size if mode != const.MODE_OFFICIAL else self.num_class) # This is to maintain original ATLOP implementation
+        self.bilinear = nn.Linear(self.embed_size * self.block_size, self.num_class if mode == const.MODE_OFFICIAL else self.out_embed_size) # This is to maintain original ATLOP implementation
 
-        self.classifier_head = nn.Linear(self.out_embed_size, self.num_class)
+        self.classifier_head = nn.Linear(self.out_embed_size, self.num_class) if mode == const.MODE_DUAL_SUPERVISED else None # NOTE: Don't want unused classification heads # NOTE: WE GOT 62 IGN F1 WITH THIS BEING ON AND NOT USING IT OFFICIAL
 
-        self.binary_head = nn.Linear(self.out_embed_size, 1)
-
-        self.projection_head = nn.Linear(self.out_embed_size, self.projection_size)
+        self.projection_head = nn.Linear(self.out_embed_size, self.projection_size) if mode == const.MODE_CONTRASTIVE else None
 
 
     def hrt_pool(self,
@@ -162,7 +161,7 @@ class DocRedModel(nn.Module):
         b2 = ts.view(-1, self.embed_size // self.block_size, self.block_size)
         bl = (b1.unsqueeze(3) * b2.unsqueeze(2)).view(-1, self.embed_size * self.block_size)
 
-        embeds = self.bilinear(bl) # returns out_embed_size or num_class based on mode
+        embeds = self.bilinear(bl) # returns out_embed_size or num_class based on mode (see constructor of bilinear)
 
         class_logits, binary_logits, proj_logits = None, None, None
 
@@ -177,23 +176,21 @@ class DocRedModel(nn.Module):
         
         elif self.mode == const.MODE_DUAL_SUPERVISED:
             class_logits = self.classifier_head(embeds)
-            binary_logits = self.binary_head(embeds)
         
         return embeds, class_logits, binary_logits, proj_logits
 
         
-
-
     def forward(self,
                 batch,
                 train):
-        labels = [torch.tensor(l) for l in batch['labels']]
-        labels = torch.cat(labels, dim=0).float()
 
         embeds, preds = None, None
-        update_loss, sup_loss, contr_loss, sup_contr_loss, unsup_contr_loss = None, None, None, None, None 
+        update_loss, tot_dual_loss, sup_loss, bin_loss, tot_contr_loss, sup_contr_loss, unsup_contr_loss = None, None, None, None, None, None, None
 
         if train: # Training
+            labels = torch.cat([torch.tensor(l) for l in batch['labels']], dim=0).float()
+            train_mask = torch.cat(batch['train_mask'], dim=0).bool()
+
             if self.mode == const.MODE_CONTRASTIVE:
                 embeds, _, _, proj_logits1 = self.embed(batch)
                 _, _, _, proj_logits2 = self.embed(batch) # Forward pass 2 - Done for ensuring different dropout masks are applied (sufficient augmentation)
@@ -201,33 +198,27 @@ class DocRedModel(nn.Module):
                 proj_logits = torch.stack([proj_logits1, proj_logits2], dim=1) # [batch_size, 2, projection_size]
                 proj_logits = F.normalize(proj_logits, dim=-1) # Have to normalize per https://github.com/HobbitLong/SupContrast/issues/22 for SupConLoss. Look at various questions/issues on 'normalization and nan loss'
 
-                contr_labels = (labels[:, 0] == 1).long()
+                contr_labels = (labels[:, 0] == 0).long() # If first label is 0, then it is a positive example
+                sup_contr_loss = self.contrloss_fn(features=proj_logits[train_mask], labels=contr_labels[train_mask])
+                unsup_contr_loss = self.contrloss_fn(features=proj_logits[train_mask])
+                tot_contr_loss = (self.contr_sup_weight * sup_contr_loss) + ((1.0 - self.contr_sup_weight) * unsup_contr_loss) # previous plotting was done with 0.45/0.55
 
-                sup_contr_loss = self.contrloss_fn(features=proj_logits, labels=contr_labels)
-                unsup_contr_loss = self.contrloss_fn(features=proj_logits)
-
-                contr_loss = (self.contr_sup_weight * sup_contr_loss) + ((1 - self.contr_sup_weight) * unsup_contr_loss) # previous plotting was done with 0.45/0.55
-
-                update_loss = contr_loss
+                update_loss = tot_contr_loss
 
             elif self.mode == const.MODE_OFFICIAL: 
                 _, class_logits, _, _ = self.embed(batch)
 
-                sup_loss = self.atloss_fn(class_logits.float(), labels.float().to(const.DEVICE))
+                sup_loss = self.atloss_fn(class_logits[train_mask].float(), labels[train_mask].float().to(const.DEVICE))
                 
                 update_loss = sup_loss
 
             elif self.mode == const.MODE_DUAL_SUPERVISED:
-                embeds, class_logits, binary_logits, _ = self.embed(batch)
+                embeds, class_logits, _, _ = self.embed(batch)
+                
+                sup_loss = self.atloss_fn(class_logits[train_mask].float(), labels[train_mask].float().to(const.DEVICE))
+                tot_dual_loss = sup_loss
 
-                binlog_labels = (labels[:, 0] == 1).float()
-
-                sup_loss = self.atloss_fn(class_logits.float(), labels.float().to(const.DEVICE))
-                binlog_loss = self.binlogloss_fn(binary_logits.flatten().float(), binlog_labels.float().to(const.DEVICE)) # NOTE: double check this
-
-                dual_loss = (self.dual_binlog_weight * binlog_loss) + ((1 - self.dual_binlog_weight) * sup_loss)
-
-                update_loss = dual_loss
+                update_loss = tot_dual_loss
 
             if update_loss is None:
                 raise ValueError('Loss to update is None')
@@ -243,17 +234,18 @@ class DocRedModel(nn.Module):
                 preds = torch.zeros(embeds.size(0), self.num_class).to(const.DEVICE) # No predictions for contrastive mode
 
             elif self.mode == const.MODE_DUAL_SUPERVISED:
-                embeds, class_logits, binary_logits, _ = self.embed(batch)
+                embeds, class_logits, _, _ = self.embed(batch)
                 preds = self.atloss_fn.get_label(class_logits.float(), num_labels=self.max_labels)
-                # TODO: add binary logits to predictions
 
             if preds is None or embeds is None:
                 raise ValueError('Prediction or embeddings are None')
-
+            
         losses = {
             'update_loss': update_loss if update_loss else torch.tensor(-1).to(const.DEVICE), # Dynamically update loss based on mode
+            'tot_dual_loss': tot_dual_loss if tot_dual_loss else torch.tensor(-1).to(const.DEVICE),
             'sup_loss': sup_loss if sup_loss else torch.tensor(-1).to(const.DEVICE),
-            'contr_loss': contr_loss if contr_loss else torch.tensor(-1).to(const.DEVICE),
+            'bin_loss': bin_loss if bin_loss else torch.tensor(-1).to(const.DEVICE),
+            'tot_contr_loss': tot_contr_loss if tot_contr_loss else torch.tensor(-1).to(const.DEVICE),
             'sup_contr_loss': sup_contr_loss if sup_contr_loss else torch.tensor(-1).to(const.DEVICE),
             'unsup_contr_loss': unsup_contr_loss if unsup_contr_loss else torch.tensor(-1).to(const.DEVICE)
         }

@@ -1,44 +1,41 @@
-from eval import get_masks, get_subset_masks, dim_reduce
+from eval import get_masks, get_subset_masks, dim_reduce, plot
 import torch
-from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
 import json
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
+from sklearn.mixture import GaussianMixture
+
 
 def contrastive_evaluate(embeddings, 
                          labels, 
                          labels_original,
                          id2rel_original,
-                         normalize=True, # Should we L2 normalize the embeddings before calculating similarities?
                          plot_save_path=None):
-    
-    if normalize:
-        dlaknwdlawknd
 
     pos_mask, holdout_mask, neg_mask = get_masks(labels, labels_original)
+    holdout_or_neg_mask = torch.logical_or(holdout_mask, neg_mask) # Holdouts and Negatives
 
-    pos_embeddings = embeddings[pos_mask]
-    neg_embeddings = torch.cat([embeddings[neg_mask], embeddings[holdout_mask]], dim=0) # Negatives for evaluation purposes are both negatives and holdouts
+    pos_center = embeddings[pos_mask].mean(dim=0)
+    neg_center = embeddings[holdout_or_neg_mask].mean(dim=0)
 
-    pos_center = pos_embeddings.mean(dim=0)
-    neg_center = neg_embeddings.mean(dim=0)
+    pca_embeddings = dim_reduce(embeddings, n_components=96, function='pca') # Can mess with dimension reduction and mean_init initialization, 64 dim with pos/neg centers seems good. Semi-supervised gaussian mixture?
+    pos_embeddings = pca_embeddings[pos_mask]
+    neg_embeddings = pca_embeddings[holdout_or_neg_mask] # Negatives for evaluation purposes are both negatives and holdouts
 
-    pos_sims = torch.tensor(cosine_similarity(embeddings, pos_center.unsqueeze(0))).flatten() # Embedding similarities to the positive center
-
-    avg_neg_sim_pos = torch.cat([pos_sims[neg_mask], pos_sims[holdout_mask]]).mean().item() # Average negative similarity to the positive center, NOTE: since our contrastive algorithm is seperating positive and negative, we assume positive mean has some meaning
-    holdout_cand_mask = (pos_sims[holdout_mask] > avg_neg_sim_pos) # Holdouts that are candidates
-    neg_cand_mask = (pos_sims[neg_mask] > avg_neg_sim_pos) # Negatives that are candidates
+    gmm = GaussianMixture(n_components=2, verbose=1, means_init=torch.stack([pos_embeddings.mean(dim=0), neg_embeddings.mean(dim=0)], dim=0), verbose_interval=1) # initialize with means?
+    gmm.fit(torch.cat([pos_embeddings, neg_embeddings[torch.randperm(neg_embeddings.shape[0])][:]], dim=0)) # can fit to subsample of negatives 400,000 was good
     
-    holdout_cand_ratio = holdout_cand_mask.sum().item() / holdout_mask.sum().item() 
-    ratio_all_cand_holdout = holdout_cand_mask.sum().item() / (holdout_cand_mask.sum().item() + neg_cand_mask.sum().item()) 
-    neg_cand_ratio = neg_cand_mask.sum().item() / neg_mask.sum().item() 
-    ratio_all_cand_neg = neg_cand_mask.sum().item() / (holdout_cand_mask.sum().item() + neg_cand_mask.sum().item()) 
+    pred_clusters = torch.tensor(gmm.predict(pca_embeddings)) # Predict clusters based upon the embeddings
+    pos_cluster_label = pred_clusters[pos_mask].mode().values.item()
 
-    pos_neg_sim = torch.tensor(cosine_similarity(pos_center.unsqueeze(0), neg_center.unsqueeze(0))).flatten().item() # Similarity between the positive and negative centers
+    cand_mask = torch.logical_and((pred_clusters == pos_cluster_label), holdout_or_neg_mask) # Candidates Mask for samples that will be used for inference/validation in the dual-objective model
+    holdout_cand_mask = torch.logical_and(holdout_mask, cand_mask) # Holdouts that are candidates
+    neg_cand_mask = torch.logical_and(neg_mask, cand_mask) # TRUE negatives that are candidates
 
     per_class_retain = {}
     holdout_counts = labels_original[holdout_mask].sum(dim=0) # 1D arr of size rel2id_original with counts of each relation in holdouts
-    holdout_cand_counts = labels_original[holdout_mask][holdout_cand_mask].sum(dim=0) # 1D arr of size rel2id_original with counts of each relation in holdouts that are candidates
+    holdout_cand_counts = labels_original[holdout_cand_mask].sum(dim=0) # 1D arr of size rel2id_original with counts of each relation in holdouts that are candidates
     for label in torch.unique(labels_original[holdout_mask], dim=0):
         for relid in label.nonzero().flatten():
             label_name = id2rel_original[relid.item()]
@@ -47,77 +44,45 @@ def contrastive_evaluate(embeddings,
             per_class_retain[label_name] = (cand_count, count, cand_count/count) # May overwrite but that's fine
 
     stats = {
-        'pos_neg_sim': pos_neg_sim,
-        'holdout_cand_ratio': holdout_cand_ratio, # Ratio of holdouts that are candidates
-        'holdout_cand_count': holdout_cand_mask.sum().item(),
-        'holdout_count': holdout_mask.sum().item(), 
-        'ratio_all_cand_holdout': ratio_all_cand_holdout, # Ratio of all candidates that are holdouts
-        'neg_cand_ratio': neg_cand_ratio, # Ratio of negatives that are candidates
-        'neg_cand_count': neg_cand_mask.sum().item(), 
-        'neg_count': neg_mask.sum().item(),
-        'ratio_all_cand_neg': ratio_all_cand_neg, # Ratio of all candidates that are negatives
+        'pos_neg_sim': torch.tensor(cosine_similarity(pos_center.unsqueeze(0), neg_center.unsqueeze(0))).flatten().item(), # Similarity between the positive and negative centers
+        'sample_ct': len(embeddings), # All samples including those not used for training
+        'cand_ct': cand_mask.sum().item(),
+        'positives': {'pos_ct': pos_mask.sum().item()},
+        'holdouts': {'holdout_ct': holdout_mask.sum().item(),  # Number of holdouts in dataset
+                     'holdout_cand_ct': holdout_cand_mask.sum().item(), # Number of candidate holdouts based upon current training set
+                     'holdout_cand_ratio': holdout_cand_mask.sum().item() / holdout_mask.sum().item(), # Ratio of holdouts that are candidates
+                     'ratio_all_cand_holdout': holdout_cand_mask.sum().item() / cand_mask.sum().item()}, # Ratio of all candidates that are holdouts
+        'negatives': {'neg_ct': neg_mask.sum().item(),  # Number of negatives in dataset
+                      'neg_cand_ct': neg_cand_mask.sum().item(), # Number of candidate holdouts based upon current training set
+                      'neg_cand_ratio': neg_cand_mask.sum().item() / neg_mask.sum().item(), # Ratio of negatives that are candidates
+                      'ratio_all_cand_neg': neg_cand_mask.sum().item() / cand_mask.sum().item()}, # Ratio of all candidates that are negatives
         'per_class_retain': per_class_retain
     }
 
 
     if plot_save_path is not None:
         p1_pos_mask, p1_holdout_mask, p1_neg_mask = get_subset_masks(pos_mask, holdout_mask, neg_mask, mode='all_pos')
-        contrastive_plot(embeddings=embeddings,
-                         labels_original=labels_original,
-                         id2rel_original=id2rel_original,
-                         pos_mask=p1_pos_mask,
-                         holdout_mask=p1_holdout_mask,
-                         neg_mask=p1_neg_mask,
-                         plot_save_path=plot_save_path.replace('.png', '-all_pos.png'))
+        plot(embeddings=embeddings,
+             labels_original=labels_original,
+             id2rel_original=id2rel_original,
+             pos_mask=p1_pos_mask,
+             holdout_mask=p1_holdout_mask,
+             neg_mask=p1_neg_mask,
+             cand_mask=cand_mask,
+             title=f'Contrastive Embedding Space (All Positives & Holdouts) - {plot_save_path.split("/")[-1]}',
+             plot_save_path=plot_save_path.replace('.png', '_all-pos.png'))
 
         p2_pos_mask, p2_holdout_mask, p2_neg_mask = get_subset_masks(pos_mask, holdout_mask, neg_mask, mode='scale')
-        contrastive_plot(embeddings=embeddings,
-                         labels_original=labels_original,
-                         id2rel_original=id2rel_original,
-                         pos_mask=p2_pos_mask,
-                         holdout_mask=p2_holdout_mask,
-                         neg_mask=p2_neg_mask,
-                         plot_save_path=plot_save_path.replace('.png', '-scale.png'))
-
+        plot(embeddings=embeddings,
+             labels_original=labels_original,
+             id2rel_original=id2rel_original,
+             pos_mask=p2_pos_mask,
+             holdout_mask=p2_holdout_mask,
+             neg_mask=p2_neg_mask,
+             cand_mask=cand_mask,
+             title=f'Contrastive Embedding Space (Scaled All) - {plot_save_path.split("/")[-1]}',
+             plot_save_path=plot_save_path.replace('.png', '_scale.png'))
     
-    return stats
-
-
-def contrastive_plot(embeddings,
-                     labels_original,
-                     id2rel_original,
-                     pos_mask,
-                     holdout_mask,
-                     neg_mask,
-                     plot_save_path):
-
-    subset_embeddings = torch.cat([embeddings[pos_mask], embeddings[holdout_mask], embeddings[neg_mask]], dim=0)
-
-    subset_pos_mask = torch.cat([torch.ones(pos_mask.sum().item()), torch.zeros(holdout_mask.sum().item() + neg_mask.sum().item())]).bool()
-    subset_holdout_mask = torch.cat([torch.zeros(pos_mask.sum().item()), torch.ones(holdout_mask.sum().item()), torch.zeros(neg_mask.sum().item())]).bool()
-    subset_neg_mask = torch.cat([torch.zeros(pos_mask.sum().item() + holdout_mask.sum().item()), torch.ones(neg_mask.sum().item())]).bool()
-    
-    subset_dimred_embeddings = dim_reduce(subset_embeddings)
-
-    print("PLOT NUM POS:", pos_mask.sum().item())
-    print("PLOT NUM HOLDOUT:", holdout_mask.sum().item())
-    print("PLOT NUM NEG:", neg_mask.sum().item())
-
-    plt.figure(figsize=(10, 10))
-    plt.title(f"Contrastive Embedding Space ({plot_save_path.split('/')[-1]})")
-
-    plt.scatter(subset_dimred_embeddings[subset_neg_mask][:, 0], subset_dimred_embeddings[subset_neg_mask][:, 1], s=0.5, c='black', label=f'True Neg.')
-    plt.scatter(subset_dimred_embeddings[subset_pos_mask][:, 0], subset_dimred_embeddings[subset_pos_mask][:, 1], s=0.5, c='blue', label=f'Training Pos.')
-
-    for label in torch.unique(labels_original[holdout_mask], dim=0):
-        label_name = [id2rel_original[relid.item()] for relid in label.nonzero().flatten()]
-        plot_mask = (labels_original[holdout_mask] == label).all(dim=1)
-
-        print(f'PLOT LABEL: {label_name} ({plot_mask.sum().item()}) samples')
-        plt.scatter(subset_dimred_embeddings[subset_holdout_mask][plot_mask][:, 0], subset_dimred_embeddings[subset_holdout_mask][plot_mask][:, 1], s=0.5, label=f'Holdout {label_name}')
-
-    plt.legend(markerscale=8)
-    plt.savefig(plot_save_path)
-    plt.show()
+    return stats, cand_mask
     
 

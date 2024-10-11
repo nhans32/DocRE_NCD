@@ -8,8 +8,60 @@ import torch
 
 def detailed_supervised_evaluate(predictions,
                                  labels,
-                                 labels_original):
-    pass
+                                 id2rel_holdout):
+    tp, tn, fp, fn = 0, 0, 0, 0
+    macro_precision, macro_recall, macro_f1 = 0, 0, 0
+    rel_stats = {}
+
+    for relid, rel in id2rel_holdout.items():
+        if relid != 0: # Ignore the 'NA' relation
+            rel_preds = predictions[:, relid]
+            rel_labels = labels[:, relid]
+
+            rel_tp = torch.logical_and((rel_preds == 1), (rel_labels == 1)).sum().item()
+            rel_tn = torch.logical_and((rel_preds == 0), (rel_labels == 0)).sum().item()
+            rel_fp = torch.logical_and((rel_preds == 1), (rel_labels == 0)).sum().item()
+            rel_fn = torch.logical_and((rel_preds == 0), (rel_labels == 1)).sum().item()
+
+            rel_precision = rel_tp / (rel_tp + rel_fp + 1e-8) # 1e-8 to prevent division by zero
+            rel_recall = rel_tp / (rel_tp + rel_fn + 1e-8)
+            rel_f1 = (2 * rel_precision * rel_recall) / (rel_precision + rel_recall + 1e-8)
+
+            rel_stats[rel] = {
+                'precision': rel_precision,
+                'recall': rel_recall,
+                'f1': rel_f1
+            }
+
+            macro_precision += rel_precision
+            macro_recall += rel_recall
+            macro_f1 += rel_f1
+
+            tp += rel_tp
+            tn += rel_tn
+            fp += rel_fp
+            fn += rel_fn
+
+    macro_precision = macro_precision / (len(id2rel_holdout) - 1) # -1 to ignore the 'NA' relation
+    macro_recall = macro_recall / (len(id2rel_holdout) - 1)
+    macro_f1 = macro_f1 / (len(id2rel_holdout) - 1)
+
+    micro_precision = tp / (tp + fp + 1e-8)
+    micro_recall = tp / (tp + fn + 1e-8)
+    micro_f1 = (2 * micro_precision * micro_recall) / (micro_precision + micro_recall + 1e-8) 
+
+    stats = {
+        'micro_precision': micro_precision,
+        'micro_recall': micro_recall,
+        'micro_f1': micro_f1,
+        'macro_precision': macro_precision,
+        'macro_recall': macro_recall,
+        'macro_f1': macro_f1,
+        'rel_stats': rel_stats
+    }
+
+    return stats
+
 
 
 def to_official(preds, 

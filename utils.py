@@ -223,13 +223,14 @@ def get_holdouts(train_samples_fp,
 # Remove holdout relationships from samples ['label'] field
 # Original labels are preserved in the original labels field
 # Also modify rel2id and id2rel to reflect the reindexing
-def remove_holdouts(samples, 
+def remove_holdouts(train_samples,
+                    dev_samples, 
                     holdout_rels,
                     rel2id,
                     id2rel):
 
     if len(holdout_rels) == 0:
-        return samples, rel2id, id2rel
+        return train_samples, dev_samples, rel2id, id2rel
     
     rel2id_holdout = {k: v for k, v in rel2id.items() if k not in holdout_rels and v != 0} # create without Na
     rel2id_holdout = {k: i+1 for i, (k, v) in enumerate(rel2id_holdout.items())}
@@ -239,7 +240,7 @@ def remove_holdouts(samples,
 
     index_switch = {v: rel2id_holdout[k] if k in rel2id_holdout else None for k, v in rel2id.items()} # index dictionary from original label indices to new label indices due to reindexing done in rel2id_holdout
     
-    for doc in samples: # Switching indices in labels
+    for doc in train_samples: # Switching indices in labels
         new_labels = []
         for label in doc['labels']:
             new_label = [0] * len(rel2id_holdout)
@@ -251,4 +252,80 @@ def remove_holdouts(samples,
             new_labels.append(new_label)
         doc['labels'] = new_labels
 
-    return samples, rel2id_holdout, id2rel_holdout
+    for doc in dev_samples: # Switching indices in labels
+        new_labels = []
+        for label in doc['labels']:
+            new_label = [0] * len(rel2id_holdout)
+            for i, x in enumerate(label):
+                if x == 1 and index_switch[i] is not None:
+                    new_label[index_switch[i]] = 1
+            if sum(new_label) == 0: # if no label is present, then it is a NA relationship
+                new_label[0] = 1
+            new_labels.append(new_label)
+        doc['labels'] = new_labels
+
+    return train_samples, dev_samples, rel2id_holdout, id2rel_holdout
+
+
+
+'''Modifies in place'''
+def add_train_mask(train_samples, cand_mask):
+    mask_idx = 0
+    for doc in tqdm(train_samples, desc='Loading Train Mask...'):
+        num_hts = len(doc['hts'])
+        doc_cand_mask = cand_mask[mask_idx:mask_idx+num_hts]
+        doc_labeled_mask = torch.tensor([l[0] == 0 for l in doc['labels']]).bool()
+        doc['train_mask'] = torch.logical_or(~doc_cand_mask, doc_labeled_mask) # train on candidates and known labeled samples
+        mask_idx += num_hts
+
+
+
+def add_pseudolabels(train_samples,
+                     dev_samples,
+                     pseudolabels,
+                     id2rel_holdout_update, # Consists of only the new pseudolabels corresponding to original holdout set
+                     id2rel_holdout,
+                     id2rel_original):
+    
+    id2rel_holdout_new = id2rel_holdout.copy()
+    id2rel_holdout_new.update(id2rel_holdout_update)
+    rel2id_holdout_new = {v: k for k, v in id2rel_holdout_new.items()}
+
+    rel2id_holdout_update = {v: k for k, v in id2rel_holdout_update.items()}
+
+    pseudolabel_idx = 0
+    for doc in tqdm(train_samples, desc="Adding pseudolabels to train samples"):
+        num_labels = len(doc['labels'])
+        doc_pseudolabels = pseudolabels[pseudolabel_idx:pseudolabel_idx+num_labels]
+
+        new_labels = []
+        for i in range(num_labels):
+            if doc_pseudolabels[i] != -1:
+                new_label = [0] * len(id2rel_holdout_new)
+                new_label[doc_pseudolabels[i]] = 1
+            else:
+                new_label = doc['labels'][i] + [0] * len(id2rel_holdout_update)
+            new_labels.append(new_label)
+        
+        doc['labels'] = new_labels
+        pseudolabel_idx += num_labels
+
+    for doc in tqdm(dev_samples, desc="Adding pseudolabels to dev samples"):
+        num_labels = len(doc['labels'])
+
+        new_labels = []
+        for i in range(num_labels):
+            new_label = doc['labels'][i] + [0] * len(id2rel_holdout_update)
+
+            original_label = doc['labels_original'][i]
+            original_nonzero_ids = [j for j, v in enumerate(original_label) if v == 1]
+
+            for id in original_nonzero_ids:
+                original_rel = id2rel_original[id]
+                if original_rel in rel2id_holdout_update:
+                    new_label[rel2id_holdout_update[original_rel]] = 1
+
+            new_labels.append(new_label)
+        doc['labels'] = new_labels
+
+    return rel2id_holdout_new, id2rel_holdout_new

@@ -1,18 +1,19 @@
 import torch
 import transformers
 import const
-from utils import batch_to_device
+from utils import batch_to_device, add_train_mask
 from tqdm import tqdm
 from eval_official import to_official, official_evaluate, detailed_supervised_evaluate
 from torch.utils.data import DataLoader
 from utils import collate_fn
 import os
-from eval_contrastive import contrastive_evaluate
+from eval_candidates import candidates_evaluate
 from utils import create_dirs, empty_dir
 import json
 import torch.nn.functional as F
-from eval_dual import dual_evaluate
+from eval_cluster import cluster_evaluate
 from model import DocRedModel
+import json
 
 def load_optim_sched(model,
                      train_dataloader,
@@ -43,9 +44,7 @@ def train_epoch(model : DocRedModel,
                 cur_steps):
     
     running_losses = {
-        'tot_dual_loss': 0.0,
         'sup_loss': 0.0,
-        'bin_loss': 0.0,
         'tot_contr_loss': 0.0,
         'sup_contr_loss': 0.0,
         'unsup_contr_loss': 0.0
@@ -139,7 +138,7 @@ def train_official(model : DocRedModel,
 
     for epoch in range(num_epochs):
         cur_steps, display_losses = train_epoch(model, optimizer, scheduler, train_dataloader, epoch, num_epochs, cur_steps)
-        _, predictions, labels, _, train_mask = validate_epoch(model, dev_dataloader)
+        _, predictions, labels, _, _ = validate_epoch(model, dev_dataloader)
 
         # -- DocRED Official Evaluation --
         official_predictions = to_official(predictions, dev_samples, id2rel_holdout)
@@ -158,28 +157,29 @@ def train_official(model : DocRedModel,
         # -- Micro and Macro F1 Stats --
         detailed_stats = detailed_supervised_evaluate(predictions, labels, id2rel_holdout)
 
+        torch.save(model.state_dict(), os.path.join(checkpoint_dir, f'latest-checkpoint.pt')) # Save model each epoch
+
         stats.append({
             'official_stats': official_stats,
             'detailed_stats': detailed_stats,
             'losses': display_losses,
             'epoch': epoch+1
         })
-        with open(os.path.join(stats_dir, 'stats.json'), 'w') as f: # This will overwrite the file each epoch
-            json.dump(stats, f, indent=2)
+        json.dump(stats, open(os.path.join(stats_dir, 'stats.json'), 'w'), indent=2)
 
 
 
-def train_contrastive(model : DocRedModel,
-                      train_dataloader,
-                      val_train_dataloader, # This is just the training samples treated as validation to get their embeddings
-                      id2rel_original,
-                      normalize_embeds, # Should we normalize the embeddings of validation output?
-                      encoder_lr,
-                      num_epochs,
-                      out_dir):
+def train_contr_candidates(model : DocRedModel,
+                           train_dataloader : DataLoader,
+                           val_train_dataloader : DataLoader, # This is just the training samples treated as validation to get their embeddings
+                           id2rel_original,
+                           normalize_embeds, # Should we normalize the embeddings of validation output?
+                           encoder_lr,
+                           num_epochs,
+                           out_dir):
     
-    if model.mode != const.MODE_CONTRASTIVE:
-        raise ValueError("Model mode must be MODE_CONTRASTIVE")
+    if model.mode != const.MODE_CONTRASTIVE_CANDIDATES:
+        raise ValueError("Model mode must be MODE_CONTRASTIVE_CANDIDATES")
     if isinstance(val_train_dataloader.sampler, torch.utils.data.sampler.RandomSampler):
         raise ValueError("val_train_dataloader must have a deterministic sampler")
 
@@ -188,7 +188,6 @@ def train_contrastive(model : DocRedModel,
 
     cur_steps = 0
     stats = []
-    best_stat = -1
 
     for epoch in range(num_epochs):
         cur_steps, display_losses = train_epoch(model, optimizer, scheduler, train_dataloader, epoch, num_epochs, cur_steps)
@@ -197,69 +196,59 @@ def train_contrastive(model : DocRedModel,
         if normalize_embeds:
             embeddings = F.normalize(embeddings, dim=-1)
 
-        contr_stats, contr_cand_mask = contrastive_evaluate(embeddings, labels, labels_original, id2rel_original, os.path.join(plots_dir, f'contr_epoch-{epoch+1}.png'))
-        contr_stats['losses'] = display_losses
-        contr_stats['epoch'] = epoch+1
-
-        if contr_stats['holdouts']['ratio_all_cand_holdout'] > best_stat: # If achieve higher holdout_cand_ratio, save model
-            empty_dir(checkpoint_dir)
-            torch.save(model.state_dict(), os.path.join(checkpoint_dir, f'best-checkpoint_epoch-{epoch+1}.pt'))
-            torch.save(contr_cand_mask, os.path.join(checkpoint_dir, f'best-contr-cand-mask.pt')) # NOTE: this is why we need deterministic sampler, see train_dual for loading
-            best_stat = contr_stats['holdouts']['ratio_all_cand_holdout']
+        cand_stats, cand_mask = candidates_evaluate(embeddings, labels, labels_original, id2rel_original, os.path.join(plots_dir, f'candidate_epoch-{epoch+1}.png'))
+        cand_stats['losses'] = display_losses
+        cand_stats['epoch'] = epoch+1
 
         torch.save(model.state_dict(), os.path.join(checkpoint_dir, f'latest-checkpoint.pt')) # Save model each epoch
-        torch.save(contr_cand_mask, os.path.join(checkpoint_dir, f'latest-contr-cand-mask.pt'))
+        torch.save(cand_mask, os.path.join(checkpoint_dir, f'latest-contr-cand-mask.pt'))
 
-        stats.append(contr_stats)
-        with open(os.path.join(stats_dir, 'stats.json'), 'w') as f: # This will overwrite the file each epoch
-            json.dump(stats, f, indent=2)
-
+        stats.append(cand_stats)
+        json.dump(stats, open(os.path.join(stats_dir, 'stats.json'), 'w'), indent=2)
 
 
-def train_dual(model : DocRedModel,
-               train_samples,
-               train_dataloader,
-               val_train_dataloader,
-               contr_cand_mask, # This is the mask generated from contrastive_evaluate
-               id2rel_original,
-               normalize_embeds,
-               encoder_lr,
-               num_epochs,
-               out_dir):
-    
-    if model.mode != const.MODE_DUAL_SUPERVISED:
-        raise ValueError("Model mode must be MODE_DUAL_SUPERVISED")
 
-    mask_idx = 0 # NOTE: THIS MODIFIES THE SAMPLES OF THE ASSOCIATED DATALOADERS, MODIFYING TRAIN SAMPLES WILL REFLECT IN TRAIN AND VAL TRAIN DATALOADERS
-    for doc in tqdm(train_samples, desc='Loading Contrastive Candidate/Train Mask...'):
-        num_hts = len(doc['hts'])
-        doc_cand_mask = contr_cand_mask[mask_idx:mask_idx+num_hts]
-        doc['train_mask'] = ~doc_cand_mask # train on everything except the candidates
-        mask_idx += num_hts
+def train_contr_cluster(model : DocRedModel,
+                        train_samples,
+                        train_dataloader : DataLoader,
+                        val_train_dataloader : DataLoader,
+                        cand_mask, # This is the mask generated from contrastive_evaluate
+                        id2rel_original,
+                        id2rel_holdout,
+                        normalize_embeds,
+                        encoder_lr,
+                        last_epoch,
+                        num_epochs,
+                        out_dir):
+                
+    if model.mode != const.MODE_CONTRASTIVE_CLUSTER:
+        raise ValueError("Model mode must be MODE_CONTRASTIVE_CLUSTER")
+
+    add_train_mask(train_samples, cand_mask)
         
     optimizer, scheduler = load_optim_sched(model, train_dataloader, num_epochs, encoder_lr)
     checkpoint_dir, stats_dir, plots_dir = create_dirs(out_dir)
 
     cur_steps = 0
     stats = []
-    best_stat = -1
 
-    for epoch in range(num_epochs):
+    for epoch in range(last_epoch, num_epochs):
         cur_steps, display_losses = train_epoch(model, optimizer, scheduler, train_dataloader, epoch, num_epochs, cur_steps)
 
-        embeddings, predictions, labels, labels_original, train_mask = validate_epoch(model, val_train_dataloader)
+        embeddings, _, labels, labels_original, train_mask = validate_epoch(model, val_train_dataloader)
         if normalize_embeds:
             embeddings = F.normalize(embeddings, dim=-1)
 
-        dual_stats = dual_evaluate(embeddings, train_mask, labels, labels_original, id2rel_original, os.path.join(plots_dir, f'dual_epoch-{epoch+1}.png'))
-        dual_stats['losses'] = display_losses
-        dual_stats['epoch'] = epoch+1
+        cluster_stats, pseudolabels, id2rel_holdout_update = cluster_evaluate(embeddings, train_mask, labels, labels_original, id2rel_original, id2rel_holdout, os.path.join(plots_dir, f'cluster_epoch-{epoch+1}.png'))
+        cluster_stats['losses'] = display_losses
+        cluster_stats['epoch'] = epoch+1
 
         torch.save(model.state_dict(), os.path.join(checkpoint_dir, f'latest-checkpoint.pt'))
+        torch.save(pseudolabels, os.path.join(checkpoint_dir, f'latest-pseudolabels.pt'))
+        json.dump(id2rel_holdout_update, open(os.path.join(checkpoint_dir, 'latest-id2rel-holdout-update.json'), 'w'), indent=2)
 
-        stats.append(dual_stats)
-        with open(os.path.join(stats_dir, 'stats.json'), 'w') as f: # This will overwrite the file each epoch
-            json.dump(stats, f, indent=2)
+        stats.append(cluster_stats)
+        json.dump(stats, open(os.path.join(stats_dir, 'stats.json'), 'w'), indent=2)
 
     for doc in tqdm(train_samples, desc="Removing Train Mask..."):
         doc.pop('train_mask') # Remove train mask

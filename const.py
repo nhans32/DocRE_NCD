@@ -4,9 +4,9 @@ LUKE_LARGE_TACRED = 'studio-ousia/luke-large-finetuned-tacred'
 
 LRS = {LUKE_BASE: 5e-5, LUKE_LARGE: 3e-5, LUKE_LARGE_TACRED: 3e-5}
 
-MODE_CONTRASTIVE = 'contr'
+MODE_CONTRASTIVE_CANDIDATES = 'contr-cand'
+MODE_CONTRASTIVE_CLUSTER = 'contr-clust'
 MODE_OFFICIAL = 'official'
-MODE_DUAL_SUPERVISED = 'dual'
 
 DEVICE = 'cuda:1'
 DATA_DIR = '/data2/nhanse02/thesis/data'
